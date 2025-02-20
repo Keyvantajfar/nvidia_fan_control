@@ -49,7 +49,7 @@ To view real-time logs:
 ```sh
 journalctl -u nvidia-fan-controlV2 -f
 ```
-#### TO BE IMPLEMENTED
+### TO BE IMPLEMENTED
 To reconfigure the fan curve:
 ```sh
 nvidia_fan_controlV2 --re-configure
