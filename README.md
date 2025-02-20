@@ -49,12 +49,14 @@ To view real-time logs:
 ```sh
 journalctl -u nvidia-fan-controlV2 -f
 ```
+#### TO BE IMPLEMENTED
 To reconfigure the fan curve:
 ```sh
 nvidia_fan_controlV2 --re-configure
 ```
 
 ## Future Enhancements
+### (please contribute if you have any 2-Fan or 3-Fan architecture and you need a more complex fan_control design)
 - Support for multi-fan GPUs.
 - Improved adaptive fan curve options.
 - A full-screen terminal-based GUI for configuring fan curves interactively.
