@@ -7,7 +7,7 @@
 This project provides a dynamic fan control utility for NVIDIA GPUs using NVML. It includes:
 - A custom fan curve based on GPU temperature.
 - A systemd service for automatic startup and logging.
-- ~~A terminal-based GUI for configuring the fan curve interactively.~~ #TODO
+- A Python based terminal interface (`fan_control.py`) for configuring fan curves.
 
 ## Steps to Set Up
 
@@ -49,11 +49,35 @@ To view real-time logs:
 ```sh
 journalctl -u nvidia-fan-controlV2 -f
 ```
-### TO BE IMPLEMENTED
-To reconfigure the fan curve:
+
+Launch the terminal interface to change profiles or edit the fan curve:
 ```sh
-nvidia_fan_controlV2 --re-configure
+python3 fan_control.py
 ```
+
+### 4. Using the Python Interface
+Install the Python NVML bindings first:
+```sh
+pip install pynvml
+```
+Then launch the interface:
+```sh
+python3 fan_control.py
+```
+Within the menu you can view the current temperature and fan speed,
+switch between `quiet`, `default`, and `performance` profiles, or edit
+the `custom` profile. The settings are stored in
+`~/.config/nvidia-fan-control/profiles.json`.
+
+Additional command line options are available:
+```sh
+python3 fan_control.py --status           # print current temperature and fan speed
+python3 fan_control.py --profile quiet   # run using a specific profile
+python3 fan_control.py --service         # run continuously as a service
+```
+
+This Python tool operates independently from the C based service
+(`nvidia_fan_controlV2`) and does not yet modify its configuration.
 
 ## Future Enhancements
 ### (please contribute if you have any 2-Fan or 3-Fan architecture and you need a more complex fan_control design)
