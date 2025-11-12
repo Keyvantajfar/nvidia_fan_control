@@ -1,0 +1,14 @@
+# Systemd unit for NVIDIA Fan Control V2
+# Installed to /etc/systemd/system/nvidia-fan-controlV2.service by installer.sh
+[Unit]
+Description=NVIDIA Fan Control (V2)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/nvidia_fan_controlV2d
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

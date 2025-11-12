@@ -1,0 +1,5 @@
+# Generated artifacts
+build/
+__pycache__/
+*.pyc
+mock_nvml/libnvidia-ml.so
