@@ -65,6 +65,14 @@ nvidia_fan_controlV2 --re-configure
 # DEVELOPMENT GUIDE
 ## How to build & run with the mock
 
+0. Make scripts executable:
+
+Make the `mockctl.sh` script executable:
+
+```bash
+chmod 755 mock_nvml/mockctl.sh
+```
+
 1. Build the mock:
 
 ```bash
@@ -73,6 +81,9 @@ make -C mock_nvml
 
 2. Build your app **against the mock header+lib** (no changes to your C file):
 
+```bash
+make -C mock_nvml clean && make -C mock_nvml
+```
 ```bash
 gcc -o nvidia_fan_controlV2 nvidia_fan_controlV2.c \
   -Imock_nvml -Lmock_nvml -lnvidia-ml \
@@ -88,18 +99,13 @@ LD_LIBRARY_PATH=./mock_nvml ./nvidia_fan_controlV2
 
 4. Drive temperature / fans from another shell:
 
-Make the `mockctl.sh` script executable:
-
-```bash
-chmod 755 mock_nvml/mockctl.sh
-```
-then:
-
 ```bash
 ./mock_nvml/mockctl.sh set-temp 38
 ./mock_nvml/mockctl.sh set-temp 60
 ./mock_nvml/mockctl.sh set-temp 80
 ./mock_nvml/mockctl.sh set-fans 1
+```
+```bash
 ./mock_nvml/mockctl.sh tail-log     # watch the speeds your app requests
 ```
 

@@ -66,7 +66,7 @@ nvmlReturn_t nvmlInit(void) {
 
     char ts[16]; now_hms(ts, sizeof ts);
     append_log("fan_speed.log", "[%s] [init] temp=%uC\n", ts, last_tempC);
-    initialized = 1
+    initialized = 1;
     return NVML_SUCCESS;    
 }
 
