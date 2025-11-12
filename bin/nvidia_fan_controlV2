@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Wrapper CLI for the NVIDIA Fan Control V2 daemon.
+
+This command provides convenient access to journald logs, the curses
+reconfiguration UI, rebuild tooling, and systemd helpers.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+CONFIG_PATH = "/etc/nvidia-fan-controlV2.conf"
+LIBEXEC_DIR_DEFAULT = "/usr/local/lib/nvidia-fan-control"
+SERVICE_NAME = "nvidia-fan-controlV2"
+DAEMON_INSTALL_PATH = "/usr/local/sbin/nvidia_fan_controlV2d"
+
+
+class CLIError(Exception):
+    pass
+
+
+def libexec_dir() -> Path:
+    override = os.environ.get("NVFC_LIBEXEC_DIR")
+    base = Path(override) if override else Path(LIBEXEC_DIR_DEFAULT)
+    return base
+
+
+def run_command(cmd: List[str], *, check: bool = True, env: Optional[dict] = None) -> int:
+    result = subprocess.run(cmd, env=env)
+    if check and result.returncode != 0:
+        raise CLIError(f"Command failed: {' '.join(cmd)}")
+    return result.returncode
+
+
+def ensure_helper(path: Path) -> None:
+    if not path.exists():
+        raise CLIError(f"Required helper not found: {path}")
+
+
+def build_daemon(use_mock: bool) -> Path:
+    base = libexec_dir()
+    gen_script = base / "gen_header_from_conf.py"
+    patch_script = base / "patch_source_for_build.py"
+    source = base / "nvidia_fan_controlV2.c"
+    build_dir = base / "build"
+    header_path = build_dir / "fan_curve_config.h"
+    patched_source = build_dir / "nvidia_fan_controlV2.c"
+    binary_path = build_dir / "nvidia_fan_controlV2d"
+
+    for helper in (gen_script, patch_script, source):
+        ensure_helper(helper)
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    run_command(["python3", str(gen_script), "--config", CONFIG_PATH, "--output", str(header_path)])
+    run_command(
+        [
+            "python3",
+            str(patch_script),
+            "--source",
+            str(source),
+            "--output",
+            str(patched_source),
+            "--header",
+            str(header_path),
+        ]
+    )
+
+    compile_cmd = ["gcc", "-O2", str(patched_source), "-o", str(binary_path)]
+    if use_mock:
+        mock_dir = base / "mock_nvml"
+        if not (mock_dir / "libnvidia-ml.so").exists():
+            run_command(["make", "-C", str(mock_dir)])
+        ensure_helper(mock_dir / "libnvidia-ml.so")
+        compile_cmd.extend([
+            f"-I{mock_dir}",
+            f"-L{mock_dir}",
+            "-lnvidia-ml",
+            "-Wl,-rpath,$ORIGIN/mock_nvml",
+        ])
+    else:
+        compile_cmd.append("-lnvidia-ml")
+
+    run_command(compile_cmd)
+    return binary_path
+
+
+def install_daemon(binary_path: Path) -> None:
+    run_command(["install", "-m", "755", str(binary_path), DAEMON_INSTALL_PATH])
+
+
+def restart_service() -> None:
+    run_command(["systemctl", "restart", SERVICE_NAME])
+
+
+def show_status() -> None:
+    run_command(["systemctl", "status", SERVICE_NAME], check=False)
+
+
+def tail_logs() -> None:
+    run_command(["journalctl", "-u", SERVICE_NAME, "-f", "-o", "cat"], check=False)
+
+
+def run_tui() -> int:
+    script = libexec_dir() / "nvfc_tui.py"
+    ensure_helper(script)
+    return run_command(["python3", str(script), "--config", CONFIG_PATH], check=False)
+
+
+def rebuild_and_restart(use_mock: bool) -> None:
+    binary = build_daemon(use_mock)
+    install_daemon(binary)
+    restart_service()
+
+
+def rebuild_only(use_mock: bool) -> None:
+    binary = build_daemon(use_mock)
+    install_daemon(binary)
+
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NVIDIA Fan Control V2 management CLI")
+    parser.add_argument("--re-configure", action="store_true", dest="reconfigure", help="Run the TUI, rebuild, and restart")
+    parser.add_argument("--status", action="store_true", help="Show systemd service status")
+    parser.add_argument("--restart", action="store_true", help="Restart the systemd service")
+    parser.add_argument("--apply", action="store_true", help="Rebuild using existing configuration and restart")
+    return parser.parse_args(argv)
+
+
+def main(argv: List[str]) -> int:
+    args = parse_args(argv)
+    use_mock = os.environ.get("USE_MOCK_NVML") == "1"
+
+    if not any([args.reconfigure, args.status, args.restart, args.apply]) and argv:
+        # Some other argument provided (argparse would have raised). Should not happen.
+        pass
+
+    try:
+        if not any([args.reconfigure, args.status, args.restart, args.apply]):
+            tail_logs()
+            return 0
+        if args.status:
+            show_status()
+        if args.restart:
+            restart_service()
+        if args.apply:
+            rebuild_and_restart(use_mock)
+        if args.reconfigure:
+            ret = run_tui()
+            if ret != 0:
+                print("Reconfiguration cancelled or failed; no changes applied.")
+                return ret
+            rebuild_and_restart(use_mock)
+        return 0
+    except CLIError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
