@@ -1,116 +1,164 @@
-# UNDER HEAVY DEVELOPEMENT
+# NVIDIA Fan Control V2 Tooling
 
----
-# NVIDIA Fan Control Guide
+This repository packages a curses-based configurator, installer scripts, and a
+wrapper CLI around the existing `nvidia_fan_controlV2.c` daemon.  The Python
+utilities let you edit the fan curve in a full-screen terminal UI, compile the
+C daemon with the saved settings, and manage the accompanying systemd service.
 
-## Overview
-This project provides a dynamic fan control utility for NVIDIA GPUs using NVML. It includes:
-- A custom fan curve based on GPU temperature.
-- A systemd service for automatic startup and logging.
-- ~~A terminal-based GUI for configuring the fan curve interactively.~~ #TODO
+## Features
+- Full-screen TUI for editing 3–7 fan curve points with presets and validation.
+- Config-driven build step that generates `build/fan_curve_config.h` and compiles
+  the daemon without modifying the original C source.
+- Installer/uninstaller scripts that deploy the daemon, CLI wrapper, config,
+  and service unit into system locations.
+- Wrapper CLI (`nvidia_fan_controlV2`) for tailing logs, restarting the service,
+  re-running the TUI, or rebuilding from an existing configuration.
+- Optional mock NVML backend and smoke test for contributors without NVIDIA
+  hardware.
 
-## Steps to Set Up
+## Repository Layout
+```
+.
+├── bin/                  # CLI wrapper installed to /usr/local/bin/
+├── installer.sh          # Main install script (runs TUI, builds, installs)
+├── uninstall.sh          # Removes installed files and service
+├── scripts/
+│   ├── gen_header_from_conf.py   # Writes build/fan_curve_config.h from config
+│   ├── patch_source_for_build.py # Copies + injects header include in C source
+│   └── smoke_test_mock.sh        # Mock NVML end-to-end smoke test
+├── systemd/nvidia-fan-controlV2.service
+├── tui/nvfc_tui.py       # curses-based configurator
+├── mock_nvml/            # Optional mock NVML headers + library
+└── nvidia_fan_controlV2.c # Upstream daemon source (never modified in-place)
+```
 
-### 1. Compile the C Code
-First, locate the NVML header file:
+## Requirements
+- Python 3.8+
+- `gcc` and the NVIDIA NVML development libraries (`libnvidia-ml.so` and
+  `nvml.h`) when building for real hardware
+- `make` (only required when building the mock NVML library)
+- Root access for installation (scripts will re-invoke with `sudo` when needed)
+
+## Quick Start – Real Hardware
+1. Ensure the NVIDIA driver stack is installed so that
+   `/usr/lib/x86_64-linux-gnu/libnvidia-ml.so` (or similar) and `nvml.h` are
+   available to the compiler.
+2. Run the installer (it will elevate with `sudo` if necessary):
+   ```sh
+   ./installer.sh
+   ```
+   - If `/etc/nvidia-fan-controlV2.conf` does not exist, the curses TUI opens so
+     you can edit the curve before building.
+   - The installer generates the configuration header, compiles the daemon, and
+     installs:
+     - `/usr/local/sbin/nvidia_fan_controlV2d`
+     - `/usr/local/bin/nvidia_fan_controlV2`
+     - `/etc/nvidia-fan-controlV2.conf`
+     - `/etc/systemd/system/nvidia-fan-controlV2.service`
+3. Reload systemd (done automatically when available) and enable the service:
+   ```sh
+   sudo systemctl enable --now nvidia-fan-controlV2
+   ```
+4. View live logs:
+   ```sh
+   nvidia_fan_controlV2
+   ```
+
+### Reconfiguring / Rebuilding on Real Hardware
+- To reopen the TUI, rebuild the daemon, and restart the service:
+  ```sh
+  sudo nvidia_fan_controlV2 --re-configure
+  ```
+- If you edit `/etc/nvidia-fan-controlV2.conf` by hand, rebuild and restart with:
+  ```sh
+  sudo nvidia_fan_controlV2 --apply
+  ```
+- Check service status:
+  ```sh
+  nvidia_fan_controlV2 --status
+  ```
+
+## Testing Without Hardware (Mock NVML)
+A mock NVML implementation in `mock_nvml/` lets you exercise the tooling
+end-to-end.
+
+### Automated Smoke Test
+Run the scripted smoke test (invokes the mock, builds the daemon, drives
+temperature changes, and validates that speeds increase):
 ```sh
-find /usr -name "nvml.h"
+USE_MOCK_NVML=1 scripts/smoke_test_mock.sh
 ```
-Then, compile the program:
+The script leaves its build artifacts under `build/`.
+
+### Manual Mock Workflow
+1. Build the mock library (if not already built):
+   ```sh
+   make -C mock_nvml
+   ```
+2. Launch the TUI against a temporary config and build in-place:
+   ```sh
+   NVFC_LIBEXEC_DIR=$(pwd) USE_MOCK_NVML=1 \
+   sudo -E ./installer.sh
+   ```
+   - Setting `NVFC_LIBEXEC_DIR` points the CLI to the repo copy of helper
+     scripts when testing without installing into `/usr/local/lib`.
+3. Run the daemon manually (optional):
+   ```sh
+   LD_LIBRARY_PATH=./mock_nvml USE_MOCK_NVML=1 build/nvidia_fan_controlV2d
+   ```
+4. Drive temperatures from another shell:
+   ```sh
+   NVML_MOCK_DIR=/tmp/nvml-mock ./mock_nvml/mockctl.sh set-temp 40
+   NVML_MOCK_DIR=/tmp/nvml-mock ./mock_nvml/mockctl.sh set-temp 70
+   NVML_MOCK_DIR=/tmp/nvml-mock ./mock_nvml/mockctl.sh tail-log
+   ```
+
+## Wrapper CLI Reference
+`nvidia_fan_controlV2` accepts the following options (run with `sudo` for
+operations that rebuild or restart the service):
+
+| Command | Description |
+|---------|-------------|
+| _no args_ | Tail journal logs (`journalctl -u nvidia-fan-controlV2 -f -o cat`). |
+| `--re-configure` | Launch TUI, rebuild with current config, restart service. |
+| `--apply` | Rebuild from existing config and restart service. |
+| `--restart` | Restart the systemd service. |
+| `--status` | Show `systemctl status` output. |
+
+The CLI automatically respects `USE_MOCK_NVML=1` when set (exported during
+rebuilds so the daemon links against the mock library).
+
+## Configuration File
+The installer/TUI writes `/etc/nvidia-fan-controlV2.conf` in INI format:
+```
+[curve]
+temps = 0,40,55,67,75,85
+speeds = 25,30,45,65,78,99
+
+[run]
+gpu_index = 0
+sleep_low = 5
+sleep_high = 2
+high_temp_threshold = 42
+```
+Edit this file carefully: temperature points must be strictly increasing within
+0–100°C, and speeds must stay within 0–100%.
+
+## Uninstall
+To remove the deployed files and service:
 ```sh
-gcc -o nvidia_fan_controlV2 nvidia_fan_controlV2.c -I/usr/the/directory/that/includes/nvml.h/file/ -lnvidia-ml
+sudo ./uninstall.sh
 ```
+The script stops/ disables the service, deletes installed binaries, removes the
+configuration, and reloads systemd.
 
-### 2. Install the Systemd Service
-Create a systemd service file:
-```sh
-echo "[Unit]
-Description=NVIDIA Fan Control Service
-After=multi-user.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/nvidia_fan_controlV2
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target" | sudo tee /etc/systemd/system/nvidia-fan-controlV2.service
-```
-
-Enable and start the service:
-```sh
-sudo systemctl enable nvidia-fan-controlV2
-sudo systemctl start nvidia-fan-controlV2
-```
-
-### 3. View Logs and Reconfigure
-To view real-time logs:
-```sh
-journalctl -u nvidia-fan-controlV2 -f
-```
-### TO BE IMPLEMENTED
-To reconfigure the fan curve:
-```sh
-nvidia_fan_controlV2 --re-configure
-```
-
-## Future Enhancements
-### (please contribute if you have any 2-Fan or 3-Fan architecture and you need a more complex fan_control design)
-- Support for multi-fan GPUs.
-- Improved adaptive fan curve options.
-- A full-screen terminal-based GUI for configuring fan curves interactively.
-
-
-# DEVELOPMENT GUIDE
-## How to build & run with the mock
-
-0. Make scripts executable:
-
-Make the `mockctl.sh` script executable:
-
-```bash
-chmod 755 mock_nvml/mockctl.sh
-```
-
-1. Build the mock:
-
-```bash
-make -C mock_nvml
-```
-
-2. Build your app **against the mock header+lib** (no changes to your C file):
-
-```bash
-make -C mock_nvml clean && make -C mock_nvml
-```
-```bash
-gcc -o nvidia_fan_controlV2 nvidia_fan_controlV2.c \
-  -Imock_nvml -Lmock_nvml -lnvidia-ml \
-  -Wl,-rpath,'$ORIGIN/mock_nvml'
-```
-
-3. Run with the mock library (and set an optional state dir):
-
-```bash
-export NVML_MOCK_DIR=/tmp/nvml-mock   # optional; defaults to /tmp/nvml-mock
-LD_LIBRARY_PATH=./mock_nvml ./nvidia_fan_controlV2
-```
-
-4. Drive temperature / fans from another shell:
-
-```bash
-./mock_nvml/mockctl.sh set-temp 38
-./mock_nvml/mockctl.sh set-temp 60
-./mock_nvml/mockctl.sh set-temp 80
-./mock_nvml/mockctl.sh set-fans 1
-```
-```bash
-./mock_nvml/mockctl.sh tail-log     # watch the speeds your app requests
-```
-
-This lets anyone run the binary and see realistic behavior:
-
-* Your loop still calls `nvmlDeviceGetTemperature` and picks a fan speed from your curve. 
-* The mock writes every requested speed to `fan_speed.log`, so tests/TUI can assert on it.
-* If no `temperature` file is present, the mock auto-ramps 35→85°C so the app still “moves”.
+## Troubleshooting
+- **Compiler cannot find NVML headers/libraries** – Install the NVIDIA driver
+  development packages or add the appropriate `-I`/`-L` paths in
+  `installer.sh`/`bin/nvidia_fan_controlV2` if your system uses non-standard
+  locations.
+- **Service fails to start after reconfiguration** – Check the journal with
+  `nvidia_fan_controlV2`, inspect `/etc/nvidia-fan-controlV2.conf` for invalid
+  values, and rerun the TUI to correct them.
+- **Testing without installation** – Export `NVFC_LIBEXEC_DIR=$(pwd)` so the CLI
+  resolves helper scripts from the working tree instead of `/usr/local/lib`.
