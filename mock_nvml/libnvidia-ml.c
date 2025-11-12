@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <time.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 static char MOCK_DIR[512] = "/tmp/nvml-mock";
 static int initialized = 0;
 static int default_speed_called = 0;
+static unsigned int last_tempC = 35; // track the last temperature returned to the app
 
 static void path_join(char *out, const char *dir, const char *name) {
     snprintf(out, 512, "%s/%s", dir, name);
@@ -31,6 +33,13 @@ static int read_int_file(const char *path, int fallback) {
     return v;
 }
 
+// (optional) simple timestamp helper (local time "HH:MM:SS")
+static void now_hms(char *buf, size_t n) {
+        time_t t = time(NULL);
+        struct tm tm; localtime_r(&t, &tm);
+        strftime(buf, n, "%H:%M:%S", &tm);
+    }
+    
 static void append_log(const char *fname, const char *fmt, ...) {
     char p[512]; path_join(p, MOCK_DIR, fname);
     FILE *f = fopen(p, "a");
@@ -45,9 +54,20 @@ nvmlReturn_t nvmlInit(void) {
     const char *d = getenv("NVML_MOCK_DIR");
     if (d && *d) snprintf(MOCK_DIR, sizeof(MOCK_DIR), "%s", d);
     ensure_dir(MOCK_DIR);
-    initialized = 1;
-    append_log("fan_speed.log", "[init]\n");
-    return NVML_SUCCESS;
+    // initialized = 1;
+    // append_log("fan_speed.log", "[init]\n");
+    // return NVML_SUCCESS;
+
+    // seed last_tempC from control file if present, else keep default
+    char temp_path[512]; path_join(temp_path, MOCK_DIR, "temperature");
+    int seed = read_int_file(temp_path, 35);
+    if (seed < 0) seed = 35;
+    last_tempC = (unsigned int)seed;
+
+    char ts[16]; now_hms(ts, sizeof ts);
+    append_log("fan_speed.log", "[%s] [init] temp=%uC\n", ts, last_tempC);
+    initialized = 1
+    return NVML_SUCCESS;    
 }
 
 nvmlReturn_t nvmlShutdown(void) {
@@ -97,13 +117,17 @@ nvmlReturn_t nvmlDeviceGetTemperature(nvmlDevice_t device, unsigned int sensorTy
     }
 
     *temp = (unsigned int)t;
+    last_tempC = *temp; // remember what we told the caller
     return NVML_SUCCESS;
 }
 
 nvmlReturn_t nvmlDeviceSetFanSpeed_v2(nvmlDevice_t device, unsigned int fanIndex, unsigned int speed) {
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
     (void)device; // silence unused-parameter warning
-    append_log("fan_speed.log", "fanIndex=%u speed=%u\n", fanIndex, speed);
+    // append_log("fan_speed.log", "fanIndex=%u speed=%u\n", fanIndex, speed);
+    char ts[16]; now_hms(ts, sizeof ts);
+    append_log("fan_speed.log", "[%s] temp=%uC fanIndex=%u speed=%u\n", ts, last_tempC, fanIndex, speed);
+   
     return NVML_SUCCESS;
 }
 
@@ -111,6 +135,9 @@ nvmlReturn_t nvmlDeviceSetDefaultFanSpeed_v2(nvmlDevice_t device, unsigned int f
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
     (void)device; // silence unused-parameter warning
     default_speed_called = 1;
-    append_log("fan_speed.log", "reset_to_auto fanIndex=%u\n", fanIndex);
+    // append_log("fan_speed.log", "reset_to_auto fanIndex=%u\n", fanIndex);
+    char ts[16]; now_hms(ts, sizeof ts);
+    append_log("fan_speed.log", "[%s] temp=%uC reset_to_auto fanIndex=%u\n", ts, last_tempC, fanIndex);
+
     return NVML_SUCCESS;
 }
