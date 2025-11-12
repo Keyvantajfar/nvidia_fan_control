@@ -60,3 +60,51 @@ nvidia_fan_controlV2 --re-configure
 - Support for multi-fan GPUs.
 - Improved adaptive fan curve options.
 - A full-screen terminal-based GUI for configuring fan curves interactively.
+
+
+# DEVELOPMENT GUIDE
+## How to build & run with the mock
+
+1. Build the mock:
+
+```bash
+make -C mock_nvml
+```
+
+2. Build your app **against the mock header+lib** (no changes to your C file):
+
+```bash
+gcc -o nvidia_fan_controlV2 nvidia_fan_controlV2.c \
+  -Imock_nvml -Lmock_nvml -lnvidia-ml \
+  -Wl,-rpath,'$ORIGIN/mock_nvml'
+```
+
+3. Run with the mock library (and set an optional state dir):
+
+```bash
+export NVML_MOCK_DIR=/tmp/nvml-mock   # optional; defaults to /tmp/nvml-mock
+LD_LIBRARY_PATH=./mock_nvml ./nvidia_fan_controlV2
+```
+
+4. Drive temperature / fans from another shell:
+
+Make the `mockctl.sh` script executable:
+
+```bash
+chmod 755 mock_nvml/mockctl.sh
+```
+then:
+
+```bash
+./mock_nvml/mockctl.sh set-temp 38
+./mock_nvml/mockctl.sh set-temp 60
+./mock_nvml/mockctl.sh set-temp 80
+./mock_nvml/mockctl.sh set-fans 1
+./mock_nvml/mockctl.sh tail-log     # watch the speeds your app requests
+```
+
+This lets anyone run the binary and see realistic behavior:
+
+* Your loop still calls `nvmlDeviceGetTemperature` and picks a fan speed from your curve. 
+* The mock writes every requested speed to `fan_speed.log`, so tests/TUI can assert on it.
+* If no `temperature` file is present, the mock auto-ramps 35→85°C so the app still “moves”.
