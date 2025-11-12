@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -68,6 +69,7 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device
 nvmlReturn_t nvmlDeviceGetNumFans(nvmlDevice_t device, unsigned int *fanCount) {
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
     if (!fanCount) return NVML_ERROR_UNKNOWN;
+    (void)device; // silence unused-parameter warning
     char p[512]; path_join(p, MOCK_DIR, "fans");
     int fans = read_int_file(p, 1);
     if (fans < 1) fans = 1;
@@ -78,6 +80,8 @@ nvmlReturn_t nvmlDeviceGetNumFans(nvmlDevice_t device, unsigned int *fanCount) {
 nvmlReturn_t nvmlDeviceGetTemperature(nvmlDevice_t device, unsigned int sensorType, unsigned int *temp) {
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
     if (!temp) return NVML_ERROR_UNKNOWN;
+    (void)device;      // silence unused-parameter warning
+    (void)sensorType;  // silence unused-parameter warning
 
     char p[512]; path_join(p, MOCK_DIR, "temperature");
     int t = read_int_file(p, -999);
@@ -98,12 +102,14 @@ nvmlReturn_t nvmlDeviceGetTemperature(nvmlDevice_t device, unsigned int sensorTy
 
 nvmlReturn_t nvmlDeviceSetFanSpeed_v2(nvmlDevice_t device, unsigned int fanIndex, unsigned int speed) {
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
+    (void)device; // silence unused-parameter warning
     append_log("fan_speed.log", "fanIndex=%u speed=%u\n", fanIndex, speed);
     return NVML_SUCCESS;
 }
 
 nvmlReturn_t nvmlDeviceSetDefaultFanSpeed_v2(nvmlDevice_t device, unsigned int fanIndex) {
     if (!initialized) return NVML_ERROR_UNINITIALIZED;
+    (void)device; // silence unused-parameter warning
     default_speed_called = 1;
     append_log("fan_speed.log", "reset_to_auto fanIndex=%u\n", fanIndex);
     return NVML_SUCCESS;
