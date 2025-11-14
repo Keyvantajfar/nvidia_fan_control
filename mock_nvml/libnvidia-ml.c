@@ -118,6 +118,10 @@ nvmlReturn_t nvmlDeviceGetTemperature(nvmlDevice_t device, unsigned int sensorTy
 
     *temp = (unsigned int)t;
     last_tempC = *temp; // remember what we told the caller
+
+    char ts[16];
+    now_hms(ts, sizeof ts);
+    append_log("fan_speed.log", "[%s] [temp] value=%uC\n", ts, last_tempC);
     return NVML_SUCCESS;
 }
 
