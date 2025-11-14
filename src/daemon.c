@@ -222,6 +222,9 @@ static void nvfc_maybe_reload_config(const char *config_path, NvfcConfig *cfg) {
     if (nvfc_load_config(config_path, &new_cfg) == 0) {
         *cfg = new_cfg;
         nvfc_reset_loop_state();
+//         g_current_fan_speed = -1;
+//         g_last_change_temp = 0;
+//         g_last_change_time = 0;
         nvfc_log_info("Reloaded config from %s", config_path);
     } else {
         nvfc_log_warn("Failed to reload config from %s, keeping previous values", config_path);
@@ -291,6 +294,7 @@ int main(int argc, char **argv) {
         if (nvfc_should_log_iteration(&cfg, temperature, desired_speed)) {
             nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
         }
+//         nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
 
         nvfc_apply_smoothing(temperature, desired_speed, device, 0);
 
