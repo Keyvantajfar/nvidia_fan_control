@@ -3,6 +3,9 @@
 Has been ONLY tested on a single fan RTX 3090!
 I take no responsibility for whatsoever.
 
+![Fun Test](images/FAN_CONTROL.JPG)
+
+
 This repository ships an NVML-based fan control daemon, a curses configurator,
 installer scripts, and a helper CLI. The v3 runtime refactor loads fan curves
 from an INI file at start-up and on `SIGHUP`, eliminating the old compile-time
