@@ -29,6 +29,10 @@ LDLIBS += -lnvidia-ml
 MOCK_DEPS :=
 endif
 
+ifneq ($(strip $(NVML_INCLUDE_DIR)),)
+CFLAGS += -I$(NVML_INCLUDE_DIR)
+endif
+
 .PHONY: build
 build: $(BINARY)
 

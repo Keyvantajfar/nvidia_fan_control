@@ -32,11 +32,78 @@ if [ ! -f "$CONFIG_PATH" ]; then
 fi
 
 USE_MOCK="${USE_MOCK_NVML:-0}"
+NVML_INCLUDE_DIR_VALUE="${NVML_INCLUDE_DIR:-}"
+
+if [ "$USE_MOCK" != "1" ]; then
+    if [ -n "$NVML_INCLUDE_DIR_VALUE" ]; then
+        echo "[installer] Using NVML include directory from environment: $NVML_INCLUDE_DIR_VALUE"
+    else
+        echo "[installer] Searching for nvml.h header..."
+        header_candidates=$(
+            (
+                set --
+                for search_path in /usr/include /usr/local/include /opt /usr; do
+                    if [ -d "$search_path" ]; then
+                        set -- "$@" "$search_path"
+                    fi
+                done
+                if [ "$#" -gt 0 ]; then
+                    find "$@" -type f -name nvml.h 2>/dev/null
+                fi
+            ) | sort -u | grep -v '/mock_nvml/' || true
+        )
+
+        header_candidates=$(printf '%s\n' "$header_candidates" | sed '/^$/d')
+
+        if [ -n "$header_candidates" ]; then
+            candidate_count=$(printf '%s\n' "$header_candidates" | wc -l | tr -d ' ')
+            if [ "$candidate_count" -gt 1 ]; then
+                echo "[installer] Multiple nvml.h candidates detected:"
+                printf '%s\n' "$header_candidates" | nl -w2 -s') '
+                if [ -t 0 ]; then
+                    while :; do
+                        printf "Select header directory [1-%s] (default 1): " "$candidate_count"
+                        if ! IFS= read -r selection; then
+                            selection=""
+                        fi
+                        [ -z "$selection" ] && selection=1
+                        case $selection in
+                            *[!0-9]*)
+                                echo "[installer] Invalid selection." >&2
+                                continue
+                                ;;
+                        esac
+                        if [ "$selection" -ge 1 ] && [ "$selection" -le "$candidate_count" ]; then
+                            break
+                        fi
+                        echo "[installer] Invalid selection." >&2
+                    done
+                else
+                    echo "[installer] Non-interactive shell detected; defaulting to the first candidate." >&2
+                    selection=1
+                fi
+                header_path=$(printf '%s\n' "$header_candidates" | sed -n "${selection}p")
+            else
+                header_path=$(printf '%s\n' "$header_candidates" | sed -n '1p')
+            fi
+
+            NVML_INCLUDE_DIR_VALUE=$(dirname "$header_path")
+            echo "[installer] Using nvml.h from $NVML_INCLUDE_DIR_VALUE"
+        else
+            echo "[installer] Warning: Unable to automatically locate nvml.h; relying on default compiler include paths." >&2
+        fi
+    fi
+fi
+
 if [ "$USE_MOCK" = "1" ]; then
     echo "[installer] Building with mock NVML support"
     USE_MOCK_NVML=1 make -C "$REPO_DIR" build
 else
-    make -C "$REPO_DIR" build
+    if [ -n "$NVML_INCLUDE_DIR_VALUE" ]; then
+        NVML_INCLUDE_DIR="$NVML_INCLUDE_DIR_VALUE" make -C "$REPO_DIR" build
+    else
+        make -C "$REPO_DIR" build
+    fi
 fi
 
 if [ ! -f "$BINARY_PATH" ]; then
