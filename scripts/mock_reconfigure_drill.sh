@@ -44,10 +44,12 @@ To join the session in another shell:
   source "$ENV_PATH"
 
 Then run the TUI against the config, edit, and save:
-  python3 $ROOT_DIR/tui/nvfc_tui.py --config "\$CONFIG_PATH"
+  # python3 $ROOT_DIR/tui/nvfc_tui.py --config "\$CONFIG_PATH"
+  python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
 
 Drive the mock backend while editing:
-  $ROOT_DIR/mock_nvml/mockctl.sh set-temp 55
+  # $ROOT_DIR/mock_nvml/mockctl.sh set-temp 55
+  mock_nvml/mockctl.sh set-temp 55
   $ROOT_DIR/mock_nvml/mockctl.sh tail-log
 
 Apply the new curve without rebuilding:
