@@ -7,8 +7,8 @@ install time.  The UI is intentionally dependency-free (only the Python stdlib)
 and can run directly on a console or over SSH.
 
 Key bindings (also shown in the UI):
-    ←/→   Move between curve points (or move a grabbed point)
-    ↑/↓   Adjust the currently focused value (temperature or speed)
+    ↑/↓   Move between curve points (or move a grabbed point)
+    ←/→   Adjust the currently focused value (temperature or speed)
     TAB   Cycle focus between temperature, speed, and runtime parameter panes
     SPACE Pick up / drop the current point for reordering
     A/R   Add or remove a point (between 3 and 7 points)
@@ -198,7 +198,7 @@ def validate_state(state: CurveState) -> Tuple[bool, str]:
 
 def draw_top_bar(stdscr: "curses._CursesWindow", width: int, state: CurveState) -> None:
     title = " NVIDIA Fan Control V2 Configurator "
-    hints = "←/→ move  ↑/↓ adjust  SPACE grab  TAB switch focus  A add  R remove  T presets  S save  Q quit"
+    hints = "↑/↓ move  ←/→ adjust  SPACE grab  TAB switch focus  A add  R remove  T presets  S save  Q quit"
     stdscr.attron(curses.A_REVERSE)
     safe_addstr(stdscr, 0, 0, title.ljust(width))
     stdscr.attroff(curses.A_REVERSE)
@@ -216,7 +216,7 @@ def draw_points_table(stdscr: "curses._CursesWindow", start_row: int, width: int
         if state.focus_area == "points" and idx == state.selected_index:
             caret_row = start_row + 2 + idx
             caret_col = 9 if state.focus_axis == 0 else 21
-            safe_addstr(stdscr, caret_row, caret_col, "→", curses.A_BOLD)
+            safe_addstr(stdscr, caret_row, caret_col, "↑", curses.A_BOLD)
     return start_row + 2 + state.num_points
 
 
@@ -496,29 +496,29 @@ def handle_points_key(state: CurveState, key: int) -> Tuple[bool, bool]:
             state.drag_target = state.selected_index
         return False, False
     if state.dragging:
-        if key == curses.KEY_LEFT and state.drag_target > 0:
+        if key == curses.KEY_UP and state.drag_target > 0:
             state.drag_target -= 1
-        elif key == curses.KEY_RIGHT and state.drag_target < state.num_points - 1:
+        elif key == curses.KEY_DOWN and state.drag_target < state.num_points - 1:
             state.drag_target += 1
         return False, False
 
-    if key == curses.KEY_LEFT:
+    if key == curses.KEY_UP:
         state.selected_index = max(0, state.selected_index - 1)
         return False, False
-    if key == curses.KEY_RIGHT:
+    if key == curses.KEY_DOWN:
         state.selected_index = min(state.num_points - 1, state.selected_index + 1)
         return False, False
-    if key == curses.KEY_UP:
-        if state.focus_axis == 0:
-            adjust_temperature(state, 1)
-        else:
-            adjust_speed(state, 1)
-        return False, False
-    if key == curses.KEY_DOWN:
+    if key == curses.KEY_LEFT:
         if state.focus_axis == 0:
             adjust_temperature(state, -1)
         else:
             adjust_speed(state, -1)
+        return False, False
+    if key == curses.KEY_RIGHT:
+        if state.focus_axis == 0:
+            adjust_temperature(state, 1)
+        else:
+            adjust_speed(state, 1)
         return False, False
     if key in (ord("["),):
         state.focus_axis = 0
