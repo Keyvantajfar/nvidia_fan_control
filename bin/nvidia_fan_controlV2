@@ -52,7 +52,9 @@ def run_tui() -> int:
     script = libexec_dir() / "nvfc_tui.py"
     if not script.exists():
         raise CLIError(f"Required helper not found: {script}")
-    return run_command(["python3", str(script), "--config", CONFIG_PATH], check=False)
+    env = os.environ.copy()
+    env.setdefault("NVFC_PARENT_CLI", str(Path(sys.argv[0]).resolve()))
+    return run_command(["python3", str(script), "--config", CONFIG_PATH], check=False, env=env)
 
 
 def reload_service() -> None:
