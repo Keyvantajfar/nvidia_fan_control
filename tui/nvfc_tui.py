@@ -152,7 +152,9 @@ def load_config(path: str) -> CurveState:
 
 
 def save_config(path: str, state: CurveState) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     parser = configparser.ConfigParser()
     parser["curve"] = {
         "temps": ",".join(str(x) for x in state.temps),
@@ -586,7 +588,11 @@ def main() -> int:
     parser.add_argument("--config", default=CONFIG_PATH, help="Path to configuration file (default: %(default)s)")
     args = parser.parse_args()
 
-    state = load_config(args.config)
+    config_path = args.config.strip()
+    if not config_path:
+        parser.error("--config requires a non-empty path. Set NVFC_CONFIG_PATH or pass an explicit location.")
+
+    state = load_config(config_path)
     curses.stdscr = None  # type: ignore[attr-defined]
 
     def wrapper(stdscr: "curses._CursesWindow") -> Tuple[bool, CurveState]:
@@ -601,8 +607,8 @@ def main() -> int:
         if not valid:
             print(f"Failed to save: {err}")
             return 1
-        save_config(args.config, final_state)
-        print(f"Configuration saved to {args.config}")
+        save_config(config_path, final_state)
+        print(f"Configuration saved to {config_path}")
         return 0
     print("No changes saved.")
     return 1
