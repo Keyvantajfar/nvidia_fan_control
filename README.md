@@ -84,6 +84,39 @@ scripts end-to-end.
 - The mock library logs fan updates under `${NVML_MOCK_DIR:-/tmp/nvml-mock}/fan_speed.log`
   for manual inspection.
 
+### Manual Mock Session
+Follow these steps to drive the daemon by hand with synthetic temperatures:
+
+1. Build against the mock NVML library and pick a scratch directory:
+   ```sh
+   USE_MOCK_NVML=1 make build
+   export NVML_MOCK_DIR="$(mktemp -d)"
+   ```
+2. Launch the daemon with any config (the test fixtures are handy starting
+   points):
+   ```sh
+   NVML_MOCK_DIR="$NVML_MOCK_DIR" ./build/nvidia_fan_controlV2d --config tests/reload_initial.conf &
+   DAEMON_PID=$!
+   ```
+3. In another terminal, set fake temperatures and tail the mock fan-speed log
+   using the helper script:
+   ```sh
+   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh set-temp 35
+   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh set-temp 70
+   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh tail-log
+   ```
+   Each call to `set-temp` updates the value the daemon reads on the next
+   iteration. `tail-log` shows the speeds the daemon asked the mock library to
+   apply, mirroring what the automated tests assert.
+4. When finished, stop the daemon and clean up:
+   ```sh
+   kill "$DAEMON_PID"
+   rm -rf "$NVML_MOCK_DIR"
+   ```
+
+The helper script also supports `set-fans` to emulate multi-fan boards if you
+need to exercise that codepath during manual testing.
+
 ## Wrapper CLI Reference
 `nvidia_fan_controlV2` accepts the following options:
 
