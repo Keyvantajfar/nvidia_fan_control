@@ -84,73 +84,33 @@ scripts end-to-end.
 - The mock library logs fan updates under `${NVML_MOCK_DIR:-/tmp/nvml-mock}/fan_speed.log`
   for manual inspection.
 
-### Manual Mock Session
-Follow these steps to drive the daemon by hand with synthetic temperatures:
-
-1. Build against the mock NVML library and pick a scratch directory:
-   ```sh
-   USE_MOCK_NVML=1 make build
-   export NVML_MOCK_DIR="$(mktemp -d)"
-   # Copy this export line into any additional shells that need to talk to the mock backend.
-   printf 'export NVML_MOCK_DIR=%q\n' "$NVML_MOCK_DIR"
-   ```
-2. Launch the daemon with any config (the test fixtures are handy starting
-   points):
-   ```sh
-   NVML_MOCK_DIR="$NVML_MOCK_DIR" ./build/nvidia_fan_controlV2d --config tests/reload_initial.conf &
-   DAEMON_PID=$!
-   ```
-3. In another terminal, set fake temperatures and tail the mock fan-speed log
-   using the helper script:
-   ```sh
-   # In each extra shell, export the value printed in step 1 so the helper targets the same directory.
-   export NVML_MOCK_DIR=/tmp/tmp.XYZ123  # replace with the path from the printf above
-   mock_nvml/mockctl.sh set-temp 35
-   mock_nvml/mockctl.sh set-temp 70
-   mock_nvml/mockctl.sh tail-log
-   ```
-   Each call to `set-temp` updates the value the daemon reads on the next
-   iteration. `tail-log` shows the speeds the daemon asked the mock library to
-   apply, mirroring what the automated tests assert.
-4. When finished, stop the daemon and clean up:
-   ```sh
-   kill "$DAEMON_PID"
-   rm -rf "$NVML_MOCK_DIR"
-   ```
-
-The helper script also supports `set-fans` to emulate multi-fan boards if you
-need to exercise that codepath during manual testing.
-
 ### Manual Reload / Reconfigure Drill
 You can confirm that editing the config file and signalling the daemon applies
-changes without a rebuild:
+changes without a rebuild by running the helper script:
 
-1. Create a temporary working directory and config, then start the daemon using
-   the mock backend as shown above. Capture its PID:
-   ```sh
-   TMPDIR=$(mktemp -d)
-   export CONFIG_PATH="$TMPDIR/nvfc.conf"
-   export NVML_MOCK_DIR="$TMPDIR/mock"
-   mkdir -p "$NVML_MOCK_DIR"
-   cp tests/reload_initial.conf "$CONFIG_PATH"
-   # Save the exports so other shells can simply `source "$TMPDIR/env.sh"`.
-   echo '##################'
-   echo 'RUN THE BELOW COMMAND IN THE OTHER TERMINAL'
-   printf 'export TMPDIR=%q\n' "$TMPDIR"
-   printf 'export NVML_MOCK_DIR=%q\nexport CONFIG_PATH=%q\n' "$NVML_MOCK_DIR" "$CONFIG_PATH" > "$TMPDIR/env.sh"
-   USE_MOCK_NVML=1 make build
-   NVFC_CONFIG_PATH="$CONFIG_PATH" ./build/nvidia_fan_controlV2d &
-   DAEMON_PID=$!
-   printf 'export DAEMON_PID=%q\n' "$DAEMON_PID" >> "$TMPDIR/env.sh"
-   ```
-2. In a second terminal, launch the TUI directly against that config, edit a
-   point, and save:
+```sh
+./scripts/mock_reconfigure_drill.sh
+```
+
+The script performs the following steps:
+
+- Builds the daemon against the mock NVML library (`USE_MOCK_NVML=1 make build`).
+- Creates an isolated scratch directory containing the default six-point curve
+  from `tests/reload_initial.conf` (the same values the daemon falls back to
+  when parsing fails).
+- Starts the daemon in the background with stdout/err captured to
+  `$TMPDIR/daemon.log` and writes an environment helper to `$TMPDIR/env.sh` so
+  additional terminals can join the session (`source "$TMPDIR/env.sh"`).
+
+Once the script prints the session banner, you can:
+
+1. Launch the TUI against the generated config:
    ```sh
    source "$TMPDIR/env.sh"
    python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
    ```
-   You can also reuse the sourced environment to drive the mock daemon while
-   editing:
+   Edit a point and save to write the updated curve.
+2. Drive the mock daemon while the TUI is open:
    ```sh
    mock_nvml/mockctl.sh set-temp 55
    mock_nvml/mockctl.sh tail-log
@@ -159,9 +119,9 @@ changes without a rebuild:
    ```sh
    kill -HUP "$DAEMON_PID"
    ```
-4. Watch the daemon log (or the mock `fan_speed.log`) to confirm the
-   `Reloaded config` message and the new speeds taking effect. When finished,
-   stop the process and delete the scratch directory:
+4. Inspect `$TMPDIR/daemon.log` or the mock `fan_speed.log` for the
+   `Reloaded config` message and new speeds. When finished, stop the process and
+   delete the scratch directory:
    ```sh
    kill "$DAEMON_PID"
    rm -rf "$TMPDIR"
