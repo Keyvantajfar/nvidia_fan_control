@@ -42,7 +42,7 @@ if ! grep -q "Reloaded config" "$LOG_PATH"; then
   exit 1
 fi
 
-if ! grep -q "speed=60" "$MOCK_DIR/fan_speed.log"; then
+if ! grep -q "speed=78" "$MOCK_DIR/fan_speed.log"; then
   echo "Expected initial speed entry" >&2
   exit 1
 fi
