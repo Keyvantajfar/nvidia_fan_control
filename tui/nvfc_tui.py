@@ -25,7 +25,10 @@ import argparse
 import configparser
 import curses
 import os
+import shutil
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 ACTIVE_SCREEN = None
@@ -607,7 +610,31 @@ def main() -> int:
         if not valid:
             print(f"Failed to save: {err}")
             return 1
-        save_config(config_path, final_state)
+        try:
+            save_config(config_path, final_state)
+        except PermissionError:
+            parent_cli = os.environ.get("NVFC_PARENT_CLI")
+            if parent_cli:
+                suggested = parent_cli
+            else:
+                cli_name = Path(sys.argv[0]).name or "nvidia_fan_controlV2"
+                suggested = shutil.which(cli_name) or cli_name
+            cli_name = Path(suggested).name
+            print(
+                "Failed to save configuration: insufficient permissions to write to "
+                f"{config_path}.\n"
+                "Re-run the configurator with elevated privileges, for example:\n"
+                f"  sudo {suggested} --re-configure"
+            )
+            if shutil.which(cli_name):
+                print(
+                    "If sudo still cannot find the command, provide its full path, e.g.:\n"
+                    f"  sudo $(command -v {cli_name}) --re-configure"
+                )
+            return 1
+        except OSError as exc:
+            print(f"Failed to save configuration: {exc}")
+            return 1
         print(f"Configuration saved to {config_path}")
         return 0
     print("No changes saved.")
