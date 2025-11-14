@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "config.h"
 #include "log.h"
@@ -20,12 +21,28 @@
 #define NVFC_MIN_SECONDS_BETWEEN_CHANGES 4
 #define NVFC_MIN_SLEEP_SECONDS 1
 
+#define NVFC_LOG_TEMP_DELTA 2
+#define NVFC_LOG_INTERVAL_LOW 20
+#define NVFC_LOG_INTERVAL_HIGH 6
+
 static volatile sig_atomic_t g_keep_running = 1;
 static volatile sig_atomic_t g_reload_config = 0;
 
 static int g_current_fan_speed = -1;
 static int g_last_change_temp = 0;
 static time_t g_last_change_time = 0;
+static int g_last_logged_temp = INT_MIN;
+static int g_last_logged_speed = -1;
+static time_t g_last_log_time = 0;
+
+static void nvfc_reset_loop_state(void) {
+    g_current_fan_speed = -1;
+    g_last_change_temp = 0;
+    g_last_change_time = 0;
+    g_last_logged_temp = INT_MIN;
+    g_last_logged_speed = -1;
+    g_last_log_time = 0;
+}
 
 static void nvfc_handle_signal(int sig) {
     (void)sig;
@@ -87,6 +104,42 @@ static void nvfc_log_startup(const NvfcConfig *cfg) {
         NVFC_MIN_FAN_SPEED_STEP,
         NVFC_MIN_TEMP_DELTA_FOR_CHANGE,
         NVFC_MIN_SECONDS_BETWEEN_CHANGES);
+}
+
+static bool nvfc_should_log_iteration(const NvfcConfig *cfg, int temperature, int desired_speed) {
+    if (!cfg) {
+        return false;
+    }
+
+    time_t now = time(NULL);
+    if (g_last_logged_temp == INT_MIN || g_last_log_time == 0) {
+        g_last_logged_temp = temperature;
+        g_last_logged_speed = desired_speed;
+        g_last_log_time = now;
+        return true;
+    }
+
+    int temp_delta = temperature - g_last_logged_temp;
+    if (temp_delta < 0) {
+        temp_delta = -temp_delta;
+    }
+
+    int speed_delta = desired_speed - g_last_logged_speed;
+    if (speed_delta < 0) {
+        speed_delta = -speed_delta;
+    }
+
+    int interval = (temperature >= cfg->high_temp_threshold) ? NVFC_LOG_INTERVAL_HIGH : NVFC_LOG_INTERVAL_LOW;
+    int elapsed = (int)difftime(now, g_last_log_time);
+
+    if (temp_delta >= NVFC_LOG_TEMP_DELTA || speed_delta >= NVFC_MIN_FAN_SPEED_STEP || elapsed >= interval) {
+        g_last_logged_temp = temperature;
+        g_last_logged_speed = desired_speed;
+        g_last_log_time = now;
+        return true;
+    }
+
+    return false;
 }
 
 static const char *nvfc_select_config_path(int argc, char **argv) {
@@ -168,9 +221,10 @@ static void nvfc_maybe_reload_config(const char *config_path, NvfcConfig *cfg) {
     nvfc_set_defaults(&new_cfg);
     if (nvfc_load_config(config_path, &new_cfg) == 0) {
         *cfg = new_cfg;
-        g_current_fan_speed = -1;
-        g_last_change_temp = 0;
-        g_last_change_time = 0;
+        nvfc_reset_loop_state();
+//         g_current_fan_speed = -1;
+//         g_last_change_temp = 0;
+//         g_last_change_time = 0;
         nvfc_log_info("Reloaded config from %s", config_path);
     } else {
         nvfc_log_warn("Failed to reload config from %s, keeping previous values", config_path);
@@ -217,6 +271,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    nvfc_reset_loop_state();
     nvfc_log_startup(&cfg);
 
     while (g_keep_running) {
@@ -236,7 +291,10 @@ int main(int argc, char **argv) {
             desired_speed = 100;
         }
 
-        nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
+        if (nvfc_should_log_iteration(&cfg, temperature, desired_speed)) {
+            nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
+        }
+//         nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
 
         nvfc_apply_smoothing(temperature, desired_speed, device, 0);
 

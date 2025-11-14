@@ -117,6 +117,42 @@ Follow these steps to drive the daemon by hand with synthetic temperatures:
 The helper script also supports `set-fans` to emulate multi-fan boards if you
 need to exercise that codepath during manual testing.
 
+### Manual Reload / Reconfigure Drill
+You can confirm that editing the config file and signalling the daemon applies
+changes without a rebuild:
+
+1. Create a temporary working directory and config, then start the daemon using
+   the mock backend as shown above. Capture its PID:
+   ```sh
+   TMPDIR=$(mktemp -d)
+   CONFIG_PATH="$TMPDIR/nvfc.conf"
+   mkdir -p "$TMPDIR/mock"
+   cp tests/reload_initial.conf "$CONFIG_PATH"
+   USE_MOCK_NVML=1 make build
+   NVML_MOCK_DIR="$TMPDIR/mock" NVFC_CONFIG_PATH="$CONFIG_PATH" ./build/nvidia_fan_controlV2d &
+   DAEMON_PID=$!
+   ```
+2. In a second terminal, launch the TUI directly against that config, edit a
+   point, and save:
+   ```sh
+   python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
+   ```
+3. Signal the running daemon so it reloads the updated curve:
+   ```sh
+   kill -HUP "$DAEMON_PID"
+   ```
+4. Watch the daemon log (or the mock `fan_speed.log`) to confirm the
+   `Reloaded config` message and the new speeds taking effect. When finished,
+   stop the process and delete the scratch directory:
+   ```sh
+   kill "$DAEMON_PID"
+   rm -rf "$TMPDIR"
+   ```
+
+On a real install the helper CLI performs the same steps when you run
+`sudo nvidia_fan_controlV2 --re-configure` (it saves via the TUI and issues
+`systemctl reload`).
+
 ## Wrapper CLI Reference
 `nvidia_fan_controlV2` accepts the following options:
 
