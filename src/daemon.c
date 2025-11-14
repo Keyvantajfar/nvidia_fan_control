@@ -106,12 +106,11 @@ static void nvfc_log_startup(const NvfcConfig *cfg) {
         NVFC_MIN_SECONDS_BETWEEN_CHANGES);
 }
 
-static bool nvfc_should_log_iteration(const NvfcConfig *cfg, int temperature, int desired_speed) {
+static bool nvfc_should_log_iteration(const NvfcConfig *cfg, int temperature, int desired_speed, time_t now) {
     if (!cfg) {
         return false;
     }
 
-    time_t now = time(NULL);
     if (g_last_logged_temp == INT_MIN || g_last_log_time == 0) {
         g_last_logged_temp = temperature;
         g_last_logged_speed = desired_speed;
@@ -132,7 +131,18 @@ static bool nvfc_should_log_iteration(const NvfcConfig *cfg, int temperature, in
     int interval = (temperature >= cfg->high_temp_threshold) ? NVFC_LOG_INTERVAL_HIGH : NVFC_LOG_INTERVAL_LOW;
     int elapsed = (int)difftime(now, g_last_log_time);
 
-    if (temp_delta >= NVFC_LOG_TEMP_DELTA || speed_delta >= NVFC_MIN_FAN_SPEED_STEP || elapsed >= interval) {
+    if (temp_delta >= NVFC_LOG_TEMP_DELTA || speed_delta >= NVFC_MIN_FAN_SPEED_STEP) {
+        g_last_logged_temp = temperature;
+        g_last_logged_speed = desired_speed;
+        g_last_log_time = now;
+        return true;
+    }
+
+    if (elapsed >= interval) {
+        if (interval == NVFC_LOG_INTERVAL_LOW) {
+            g_last_log_time = now;
+            return false;
+        }
         g_last_logged_temp = temperature;
         g_last_logged_speed = desired_speed;
         g_last_log_time = now;
@@ -170,7 +180,7 @@ static const char *nvfc_select_config_path(int argc, char **argv) {
     return NVFC_DEFAULT_CONFIG_PATH;
 }
 
-static void nvfc_apply_smoothing(int current_temp, int desired_speed, nvmlDevice_t device, unsigned int fan_index) {
+static void nvfc_apply_smoothing(int current_temp, int desired_speed, nvmlDevice_t device, unsigned int fan_index, time_t now) {
     if (g_current_fan_speed < 0) {
         if (nvmlDeviceSetFanSpeed_v2(device, fan_index, desired_speed) != NVML_SUCCESS) {
             nvfc_log_error("Failed to set fan speed to %d%%", desired_speed);
@@ -178,7 +188,7 @@ static void nvfc_apply_smoothing(int current_temp, int desired_speed, nvmlDevice
         }
         g_current_fan_speed = desired_speed;
         g_last_change_temp = current_temp;
-        g_last_change_time = time(NULL);
+        g_last_change_time = now;
         nvfc_log_info("Updated Fan Speed: %d%%", desired_speed);
         return;
     }
@@ -196,7 +206,6 @@ static void nvfc_apply_smoothing(int current_temp, int desired_speed, nvmlDevice
         delta_temp = -delta_temp;
     }
 
-    time_t now = time(NULL);
     int delta_time = (int)difftime(now, g_last_change_time);
     if (delta_temp < NVFC_MIN_TEMP_DELTA_FOR_CHANGE && delta_time < NVFC_MIN_SECONDS_BETWEEN_CHANGES) {
         return;
@@ -291,12 +300,14 @@ int main(int argc, char **argv) {
             desired_speed = 100;
         }
 
-        if (nvfc_should_log_iteration(&cfg, temperature, desired_speed)) {
+        time_t now = time(NULL);
+
+        if (nvfc_should_log_iteration(&cfg, temperature, desired_speed, now)) {
             nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
         }
 //         nvfc_log_info("Temp: %d°C -> Fan Speed: %d%%", temperature, desired_speed);
 
-        nvfc_apply_smoothing(temperature, desired_speed, device, 0);
+        nvfc_apply_smoothing(temperature, desired_speed, device, 0, now);
 
         int sleep_time = temperature >= cfg.high_temp_threshold ? cfg.sleep_high : cfg.sleep_low;
         if (sleep_time < NVFC_MIN_SLEEP_SECONDS) {
