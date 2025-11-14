@@ -134,7 +134,8 @@ changes without a rebuild:
    mkdir -p "$NVML_MOCK_DIR"
    cp tests/reload_initial.conf "$CONFIG_PATH"
    # Save the exports so other shells can simply `source "$TMPDIR/env.sh"`.
-   printf 'export NVML_MOCK_DIR=%q\n' "$TMPDIR"
+   echo 'RUN THE BELOW COMMAND IN THE OTHER TERMINAL'
+   printf 'export TMPDIR=%q\n' "$TMPDIR"
    printf 'export NVML_MOCK_DIR=%q\nexport CONFIG_PATH=%q\n' "$NVML_MOCK_DIR" "$CONFIG_PATH" > "$TMPDIR/env.sh"
    USE_MOCK_NVML=1 make build
    NVFC_CONFIG_PATH="$CONFIG_PATH" ./build/nvidia_fan_controlV2d &
