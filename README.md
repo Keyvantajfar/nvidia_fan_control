@@ -36,7 +36,10 @@ configuration step.
 
 ## Quick Start – Real Hardware
 1. Ensure the NVIDIA driver stack is installed so that `libnvidia-ml.so` and
-   `nvml.h` are available to the compiler.
+   `nvml.h` are available to the compiler. The installer will attempt to locate
+   `nvml.h` under common include directories automatically and will let you
+   choose between multiple matches when found; set
+   `NVML_INCLUDE_DIR=/path/to/dir` beforehand to override or skip the search.
 2. Run the installer (it elevates with `sudo` if necessary):
    ```sh
    ./installer.sh
