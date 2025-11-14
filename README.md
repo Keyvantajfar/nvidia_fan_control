@@ -91,6 +91,8 @@ Follow these steps to drive the daemon by hand with synthetic temperatures:
    ```sh
    USE_MOCK_NVML=1 make build
    export NVML_MOCK_DIR="$(mktemp -d)"
+   # Copy this export line into any additional shells that need to talk to the mock backend.
+   printf 'export NVML_MOCK_DIR=%q\n' "$NVML_MOCK_DIR"
    ```
 2. Launch the daemon with any config (the test fixtures are handy starting
    points):
@@ -101,9 +103,11 @@ Follow these steps to drive the daemon by hand with synthetic temperatures:
 3. In another terminal, set fake temperatures and tail the mock fan-speed log
    using the helper script:
    ```sh
-   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh set-temp 35
-   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh set-temp 70
-   NVML_MOCK_DIR="$NVML_MOCK_DIR" mock_nvml/mockctl.sh tail-log
+   # In each extra shell, export the value printed in step 1 so the helper targets the same directory.
+   export NVML_MOCK_DIR=/tmp/tmp.XYZ123  # replace with the path from the printf above
+   mock_nvml/mockctl.sh set-temp 35
+   mock_nvml/mockctl.sh set-temp 70
+   mock_nvml/mockctl.sh tail-log
    ```
    Each call to `set-temp` updates the value the daemon reads on the next
    iteration. `tail-log` shows the speeds the daemon asked the mock library to
@@ -125,17 +129,27 @@ changes without a rebuild:
    the mock backend as shown above. Capture its PID:
    ```sh
    TMPDIR=$(mktemp -d)
-   CONFIG_PATH="$TMPDIR/nvfc.conf"
-   mkdir -p "$TMPDIR/mock"
+   export CONFIG_PATH="$TMPDIR/nvfc.conf"
+   export NVML_MOCK_DIR="$TMPDIR/mock"
+   mkdir -p "$NVML_MOCK_DIR"
    cp tests/reload_initial.conf "$CONFIG_PATH"
+   # Save the exports so other shells can simply `source "$TMPDIR/env.sh"`.
+   printf 'export NVML_MOCK_DIR=%q\nexport CONFIG_PATH=%q\n' "$NVML_MOCK_DIR" "$CONFIG_PATH" > "$TMPDIR/env.sh"
    USE_MOCK_NVML=1 make build
-   NVML_MOCK_DIR="$TMPDIR/mock" NVFC_CONFIG_PATH="$CONFIG_PATH" ./build/nvidia_fan_controlV2d &
+   NVFC_CONFIG_PATH="$CONFIG_PATH" ./build/nvidia_fan_controlV2d &
    DAEMON_PID=$!
    ```
 2. In a second terminal, launch the TUI directly against that config, edit a
    point, and save:
    ```sh
+   source "$TMPDIR/env.sh"
    python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
+   ```
+   You can also reuse the sourced environment to drive the mock daemon while
+   editing:
+   ```sh
+   mock_nvml/mockctl.sh set-temp 55
+   mock_nvml/mockctl.sh tail-log
    ```
 3. Signal the running daemon so it reloads the updated curve:
    ```sh
