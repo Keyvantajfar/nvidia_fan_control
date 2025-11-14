@@ -1,4 +1,7 @@
-# NVIDIA Fan Control V2 Tooling
+# NVIDIA Fan Control V0
+## UNDER HEAVY DEPELOPEMENT (PLEASE CONTRIBUTE LOL)
+Has been ONLY tested on a single fan RTX 3090!
+I take no responsibility for whatsoever.
 
 This repository ships an NVML-based fan control daemon, a curses configurator,
 installer scripts, and a helper CLI. The v3 runtime refactor loads fan curves
@@ -178,3 +181,6 @@ preserving the runtime options from `[run]`.
   sudo ./uninstall.sh
   ```
 
+# TODO
+- Add multi-fan control capability (preferably all fans of a single GPU at the same time)
+- Test on different GPUs
