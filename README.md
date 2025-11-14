@@ -104,11 +104,16 @@ The script performs the following steps:
 
 Once the script prints the session banner, you can:
 
-1. Launch the TUI against the generated config:
+~~0. Launch the TUI against the generated config:~~
+   ~~source "$TMPDIR/env.sh"~~
+   ~~python3 tui/nvfc_tui.py --config "$CONFIG_PATH"~~
+   
+1. Do what the script says to source Launch the TUI against the generated config:
    ```sh
-   source "$TMPDIR/env.sh"
+   source "$TMPDIR(script already gives you this you dont have it in other terminals)/env.sh"
    python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
    ```
+
    Edit a point and save to write the updated curve.
 2. Drive the mock daemon while the TUI is open:
    ```sh
