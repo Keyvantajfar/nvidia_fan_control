@@ -1,5 +1,5 @@
 # NVIDIA Fan Control V0
-## UNDER HEAVY DEPELOPEMENT (PLEASE CONTRIBUTE LOL)
+## UNDER HEAVY DEVELOPMENT (PLEASE CONTRIBUTE LOL)
 Has been ONLY tested on a single fan RTX 3090!
 I take no responsibility for whatsoever.
 
