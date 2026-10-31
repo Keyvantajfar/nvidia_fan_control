@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""nvfc - management CLI for NVIDIA Fan Control.
+
+    nvfc                 open the configurator (asks for sudo itself)
+    nvfc logs            follow the daemon log
+    nvfc status          live temperature / fan speed and service state
+    nvfc apply           reload the config file without restarting
+    nvfc restart         restart the service
+    nvfc --version
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+CONFIG_PATH = os.environ.get("NVFC_CONFIG_PATH") or "/etc/nvidia-fan-control.conf"
+LIBEXEC_DIR_DEFAULT = "/usr/local/lib/nvidia-fan-control"
+SERVICE_NAME = "nvidia-fan-control"
+STATUS_PATH = os.environ.get("NVFC_STATUS_PATH") or "/run/nvidia-fan-control/status"
+
+
+class CLIError(Exception):
+    pass
+
+
+def libexec_dir() -> Path:
+    return Path(os.environ.get("NVFC_LIBEXEC_DIR") or LIBEXEC_DIR_DEFAULT)
+
+
+def read_version() -> str:
+    here = Path(__file__).resolve().parent
+    for candidate in (libexec_dir() / "VERSION", here.parent / "VERSION"):
+        try:
+            return candidate.read_text().strip()
+        except OSError:
+            continue
+    return "unknown"
+
+
+def run_command(cmd: List[str], *, check: bool = True) -> int:
+    result = subprocess.run(cmd)
+    if check and result.returncode != 0:
+        raise CLIError(f"Command failed: {' '.join(cmd)}")
+    return result.returncode
+
+
+def ensure_root(args: List[str]) -> None:
+    """Re-run this command under sudo when root is needed."""
+    if os.geteuid() == 0:
+        return
+    sudo = "sudo"
+    try:
+        os.execvp(sudo, [sudo, "-E", str(Path(sys.argv[0]).resolve()), *args])
+    except FileNotFoundError:
+        raise CLIError("Root privileges are required and sudo was not found; re-run as root.")
+
+
+def service_state() -> str:
+    try:
+        out = subprocess.run(["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True)
+        return out.stdout.strip() or "unknown"
+    except FileNotFoundError:
+        return "unknown"
+
+
+def read_status() -> Optional[Dict[str, str]]:
+    try:
+        text = Path(STATUS_PATH).read_text()
+    except OSError:
+        return None
+    data = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    return data or None
+
+
+def cmd_status() -> None:
+    print(f"Service : {service_state()}")
+    st = read_status()
+    if not st:
+        print("Live    : no data (daemon not running yet?)")
+        return
+    try:
+        age = max(0, int(time.time()) - int(st.get("ts", "0")))
+    except ValueError:
+        age = 0
+    fan = st.get("fan", "?")
+    print(f"GPU temp: {st.get('temp', '?')} °C")
+    print(f"Fan     : {'auto/unset' if fan == '-1' else fan + ' %'} (target {st.get('target', '?')} %)")
+    print(f"Smooth  : {'on' if st.get('smooth') == '1' else 'off'}")
+    print(f"Polling : every {st.get('interval', '?')} s (last change {age}s ago)")
+
+
+def cmd_logs() -> None:
+    rc = run_command(["journalctl", "-u", SERVICE_NAME, "-f", "-o", "cat"], check=False)
+    if rc not in (0, 130):
+        print("Could not read the journal. Try: sudo nvfc logs  (or join the systemd-journal group).")
+
+
+def cmd_configure() -> int:
+    script = libexec_dir() / "nvfc_tui.py"
+    if not script.exists():
+        # Running from a source checkout.
+        script = Path(__file__).resolve().parent.parent / "tui" / "nvfc_tui.py"
+    if not script.exists():
+        raise CLIError("Configurator (nvfc_tui.py) not found; re-run installer.sh")
+    ret = run_command([sys.executable, str(script), "--config", CONFIG_PATH], check=False)
+    if ret != 0:
+        print("No changes applied.")
+        return ret
+    run_command(["systemctl", "reload", SERVICE_NAME], check=False)
+    print("Config saved and reloaded.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="nvfc", description="NVIDIA Fan Control manager")
+    p.add_argument("command", nargs="?", choices=["configure", "logs", "status", "apply", "restart"],
+                   help="default: configure")
+    p.add_argument("--version", action="store_true")
+    # Legacy flags from the V2 wrapper.
+    p.add_argument("--re-configure", dest="legacy_configure", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--status", dest="legacy_status", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--restart", dest="legacy_restart", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--apply", dest="legacy_apply", action="store_true", help=argparse.SUPPRESS)
+    return p
+
+
+def main(argv: List[str]) -> int:
+    args = build_parser().parse_args(argv)
+    if args.version:
+        print(f"nvfc {read_version()}")
+        return 0
+
+    command = args.command
+    if args.legacy_configure:
+        command = "configure"
+    elif args.legacy_status:
+        command = "status"
+    elif args.legacy_restart:
+        command = "restart"
+    elif args.legacy_apply:
+        command = "apply"
+    command = command or "configure"
+
+    try:
+        if command == "status":
+            cmd_status()
+        elif command == "logs":
+            cmd_logs()
+        elif command == "restart":
+            ensure_root(argv)
+            run_command(["systemctl", "restart", SERVICE_NAME])
+        elif command == "apply":
+            ensure_root(argv)
+            run_command(["systemctl", "reload", SERVICE_NAME])
+        else:
+            ensure_root(argv)
+            return cmd_configure()
+        return 0
+    except CLIError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

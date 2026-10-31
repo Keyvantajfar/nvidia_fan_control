@@ -8,6 +8,9 @@ TESTS=(
   test_config_clamp.sh
   test_reload.sh
   test_smoothing.sh
+  test_smart_smooth.sh
+  test_adaptive_sleep.sh
+  test_version.sh
 )
 
 for script in "${TESTS[@]}"; do

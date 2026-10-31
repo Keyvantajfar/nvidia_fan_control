@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Curses-based configurator for nvidia_fan_controlV2.
+"""Curses-based configurator for NVIDIA Fan Control.
 
-This module implements the interactive terminal user interface for defining the
-fan curve and runtime parameters that will be embedded into the daemon at
-install time.  The UI is intentionally dependency-free (only the Python stdlib)
-and can run directly on a console or over SSH.
+Interactive terminal UI for editing the fan curve, Smart Smooth and polling
+options stored in the daemon's INI config file (applied with a reload, no
+rebuild).  Dependency-free (stdlib only); works on a console or over SSH.
 
 Key bindings (also shown in the UI):
     ↑/↓   Move between curve points (or move a grabbed point)
@@ -16,8 +15,11 @@ Key bindings (also shown in the UI):
     S     Save
     Q     Quit without saving
 
-The TUI persists configuration to /etc/nvidia-fan-controlV2.conf using a simple
-INI structure that other tooling in this project consumes.
+In the runtime settings pane, ←/→ (or SPACE) toggles Smart Smooth.  While the
+daemon runs, the plot shows a live @ marker for the current temperature/fan.
+
+The TUI persists configuration to /etc/nvidia-fan-control.conf as a simple INI
+file.
 """
 from __future__ import annotations
 
@@ -27,7 +29,8 @@ import curses
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -44,11 +47,13 @@ def safe_addstr(win, y, x, text, attr=None):
 
 
 
-CONFIG_PATH = "/etc/nvidia-fan-controlV2.conf"
+CONFIG_PATH = "/etc/nvidia-fan-control.conf"
+STATUS_PATH = os.environ.get("NVFC_STATUS_PATH") or "/run/nvidia-fan-control/status"
+STATUS_MAX_AGE = 90  # daemon rewrites at least every 60 s
 MIN_POINTS = 3
 MAX_POINTS = 7
 TEMP_MIN = 0
-TEMP_MAX = 100
+TEMP_MAX = 120
 SPEED_MIN = 0
 SPEED_MAX = 100
 
@@ -56,8 +61,46 @@ DEFAULT_RUN_SETTINGS = {
     "gpu_index": 0,
     "sleep_low": 5,
     "sleep_high": 2,
+    "sleep_max": 10,
     "high_temp_threshold": 42,
 }
+
+# Advanced Smart Smooth keys: not shown in the UI, but preserved on save.
+DEFAULT_SMOOTH_EXTRA = {"deadband": "3", "down_hold": "15", "down_step": "5", "emergency_temp": "85"}
+
+
+def read_version() -> str:
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "VERSION", here.parent / "VERSION"):
+        try:
+            return candidate.read_text().strip()
+        except OSError:
+            continue
+    return ""
+
+
+def read_live_status():
+    """Return (temp, fan, target) from the daemon's status file, or None if stale/missing."""
+    try:
+        data = dict(line.split("=", 1) for line in Path(STATUS_PATH).read_text().splitlines() if "=" in line)
+        if time.time() - int(data["ts"]) > STATUS_MAX_AGE:
+            return None
+        return int(data["temp"]), int(data["fan"]), int(data["target"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def interpolate(temps: List[int], speeds: List[int], t: float) -> float:
+    """Same curve the daemon uses when Smart Smooth is on."""
+    if t <= temps[0]:
+        return speeds[0]
+    if t >= temps[-1]:
+        return speeds[-1]
+    for i in range(len(temps) - 1):
+        if t < temps[i + 1]:
+            frac = (t - temps[i]) / (temps[i + 1] - temps[i])
+            return speeds[i] + (speeds[i + 1] - speeds[i]) * frac
+    return speeds[-1]
 
 TEMPLATES: Dict[str, Tuple[List[int], List[int]]] = {
     "Quiet": ([0, 45, 60, 72, 82, 92, 100], [15, 20, 30, 45, 60, 75, 90]),
@@ -74,7 +117,10 @@ class CurveState:
     gpu_index: int = DEFAULT_RUN_SETTINGS["gpu_index"]
     sleep_low: int = DEFAULT_RUN_SETTINGS["sleep_low"]
     sleep_high: int = DEFAULT_RUN_SETTINGS["sleep_high"]
+    sleep_max: int = DEFAULT_RUN_SETTINGS["sleep_max"]
     high_temp_threshold: int = DEFAULT_RUN_SETTINGS["high_temp_threshold"]
+    smooth_enabled: bool = True
+    smooth_extra: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SMOOTH_EXTRA))
     selected_index: int = 0
     focus_axis: int = 0  # 0 -> temperature, 1 -> speed
     focus_area: str = "points"  # "points" or "fields"
@@ -94,7 +140,10 @@ class CurveState:
             gpu_index=self.gpu_index,
             sleep_low=self.sleep_low,
             sleep_high=self.sleep_high,
+            sleep_max=self.sleep_max,
             high_temp_threshold=self.high_temp_threshold,
+            smooth_enabled=self.smooth_enabled,
+            smooth_extra=dict(self.smooth_extra),
             selected_index=self.selected_index,
             focus_axis=self.focus_axis,
             focus_area=self.focus_area,
@@ -139,9 +188,13 @@ def load_config(path: str) -> CurveState:
     state.gpu_index = parser.getint("run", "gpu_index", fallback=DEFAULT_RUN_SETTINGS["gpu_index"])
     state.sleep_low = parser.getint("run", "sleep_low", fallback=DEFAULT_RUN_SETTINGS["sleep_low"])
     state.sleep_high = parser.getint("run", "sleep_high", fallback=DEFAULT_RUN_SETTINGS["sleep_high"])
+    state.sleep_max = parser.getint("run", "sleep_max", fallback=DEFAULT_RUN_SETTINGS["sleep_max"])
     state.high_temp_threshold = parser.getint(
         "run", "high_temp_threshold", fallback=DEFAULT_RUN_SETTINGS["high_temp_threshold"]
     )
+    state.smooth_enabled = parser.getboolean("smooth", "enabled", fallback=True)
+    for key in DEFAULT_SMOOTH_EXTRA:
+        state.smooth_extra[key] = parser.get("smooth", key, fallback=DEFAULT_SMOOTH_EXTRA[key])
     # Try to detect matching template
     for name, (temps_template, speeds_template) in TEMPLATES.items():
         if temps_template is None:
@@ -167,8 +220,10 @@ def save_config(path: str, state: CurveState) -> None:
         "gpu_index": str(state.gpu_index),
         "sleep_low": str(state.sleep_low),
         "sleep_high": str(state.sleep_high),
+        "sleep_max": str(state.sleep_max),
         "high_temp_threshold": str(state.high_temp_threshold),
     }
+    parser["smooth"] = {"enabled": "on" if state.smooth_enabled else "off", **state.smooth_extra}
     with open(path, "w", encoding="utf-8") as fp:
         parser.write(fp)
 
@@ -192,17 +247,20 @@ def validate_state(state: CurveState) -> Tuple[bool, str]:
     for idx, speed in enumerate(state.speeds):
         if not (SPEED_MIN <= speed <= SPEED_MAX):
             return False, f"Speed at index {idx} must be within {SPEED_MIN}-{SPEED_MAX}."
-    if state.sleep_low < 1 or state.sleep_high < 1:
+    if state.sleep_low < 1 or state.sleep_high < 1 or state.sleep_max < 1:
         return False, "Sleep intervals must be positive integers."
+    if state.sleep_max < state.sleep_low:
+        return False, "Sleep max must be >= sleep low."
     if state.high_temp_threshold < TEMP_MIN or state.high_temp_threshold > TEMP_MAX:
-        return False, "High temperature threshold must fall within 0-100°C."
+        return False, f"High temperature threshold must fall within {TEMP_MIN}-{TEMP_MAX}°C."
     if state.gpu_index < 0:
         return False, "GPU index cannot be negative."
     return True, ""
 
 
 def draw_top_bar(stdscr: "curses._CursesWindow", width: int, state: CurveState) -> None:
-    title = " NVIDIA Fan Control V2 Configurator "
+    version = read_version()
+    title = f" NVIDIA Fan Control {version} Configurator ".replace("  ", " ")
     hints = "↑/↓ move  ←/→ adjust  SPACE grab  TAB switch focus  A add  R remove  T presets  S save  Q quit"
     stdscr.attron(curses.A_REVERSE)
     safe_addstr(stdscr, 0, 0, title.ljust(width))
@@ -231,7 +289,9 @@ def draw_run_settings(stdscr: "curses._CursesWindow", start_row: int, width: int
         ("GPU index", state.gpu_index),
         ("Sleep low (s)", state.sleep_low),
         ("Sleep high (s)", state.sleep_high),
+        ("Sleep max (s)", state.sleep_max),
         ("High temp threshold", state.high_temp_threshold),
+        ("Smart Smooth", "ON " if state.smooth_enabled else "OFF"),
     ]
     for idx, (label, value) in enumerate(labels):
         highlight = curses.A_REVERSE if state.focus_area == "fields" and idx == state.field_index else curses.A_NORMAL
@@ -245,39 +305,49 @@ def draw_plot(stdscr: "curses._CursesWindow", start_row: int, start_col: int, he
     for i in range(1, height):
         safe_addstr(stdscr, start_row + i, start_col, "|")
     safe_addstr(stdscr, start_row + height, start_col, "+" + "-" * (width - 1))
-    safe_addstr(stdscr, start_row + height + 1, start_col, "Temp (°C)")
-    safe_addstr(stdscr, start_row - 1, start_col, "Speed (%)")
+    mode = "smooth (interpolated)" if state.smooth_enabled else "stepped"
+    safe_addstr(stdscr, start_row + height + 1, start_col, f"Temp (°C)   curve: {mode}")
+    live = read_live_status()
+    live_text = f"   live: {live[0]}°C -> fan {live[1]}%" if live and live[1] >= 0 else ""
+    safe_addstr(stdscr, start_row - 1, start_col, "Speed (%)" + live_text)
 
     if not state.temps:
         return
 
-    temp_range = max(TEMP_MAX - TEMP_MIN, 1)
+    temp_view_max = 100 if max(state.temps) <= 100 else TEMP_MAX
+    temp_range = max(temp_view_max - TEMP_MIN, 1)
     speed_range = max(SPEED_MAX - SPEED_MIN, 1)
 
-    def temp_to_x(temp: int) -> int:
-        return int((temp - TEMP_MIN) / temp_range * (width - 2))
+    def temp_to_x(temp: float) -> int:
+        return max(0, min(width - 2, int((temp - TEMP_MIN) / temp_range * (width - 2))))
 
-    def speed_to_y(speed: int) -> int:
-        return int((SPEED_MAX - speed) / speed_range * (height - 1))
+    def speed_to_y(speed: float) -> int:
+        return max(0, min(height - 1, int((SPEED_MAX - speed) / speed_range * (height - 1))))
 
-    for idx in range(state.num_points):
-        temp = state.temps[idx]
-        speed = state.speeds[idx]
-        x = temp_to_x(temp)
-        y = speed_to_y(speed)
-        char = "*" if idx == state.selected_index and state.focus_area == "points" else "o"
-        safe_addstr(stdscr, start_row + 1 + y, start_col + 1 + x, char)
-        if idx < state.num_points - 1:
-            next_temp = state.temps[idx + 1]
-            next_speed = state.speeds[idx + 1]
-            next_x = temp_to_x(next_temp)
-            next_y = speed_to_y(next_speed)
-            # Draw horizontal line then vertical step to emulate step curve
+    if state.smooth_enabled:
+        for cx in range(width - 1):
+            t = TEMP_MIN + cx * temp_range / max(width - 2, 1)
+            y = speed_to_y(interpolate(state.temps, state.speeds, t))
+            safe_addstr(stdscr, start_row + 1 + y, start_col + 1 + cx, ".")
+    else:
+        for idx in range(state.num_points - 1):
+            x, y = temp_to_x(state.temps[idx]), speed_to_y(state.speeds[idx])
+            next_x, next_y = temp_to_x(state.temps[idx + 1]), speed_to_y(state.speeds[idx + 1])
+            # Horizontal run, then a vertical step: the classic stepped curve.
             for x_step in range(min(x, next_x), max(x, next_x) + 1):
                 safe_addstr(stdscr, start_row + 1 + y, start_col + 1 + x_step, "-")
             direction = 1 if next_y > y else -1
             for y_step in range(y, next_y, direction):
                 safe_addstr(stdscr, start_row + 1 + y_step, start_col + 1 + next_x, "|")
+
+    for idx in range(state.num_points):
+        x = temp_to_x(state.temps[idx])
+        y = speed_to_y(state.speeds[idx])
+        char = "*" if idx == state.selected_index and state.focus_area == "points" else "o"
+        safe_addstr(stdscr, start_row + 1 + y, start_col + 1 + x, char)
+
+    if live and live[1] >= 0:
+        safe_addstr(stdscr, start_row + 1 + speed_to_y(live[1]), start_col + 1 + temp_to_x(live[0]), "@", curses.A_BOLD)
 
 
 def draw_messages(stdscr: "curses._CursesWindow", height: int, width: int, state: CurveState) -> None:
@@ -412,6 +482,8 @@ def handle_key(state: CurveState, key: int) -> Tuple[bool, bool]:
 
     Returns (should_exit, should_save).
     """
+    if key == -1:  # idle tick (live marker refresh)
+        return False, False
     state.error_message = ""
 
     if key in (ord("q"), ord("Q")):
@@ -452,7 +524,7 @@ def _handle_template_selection(state: CurveState) -> Tuple[bool, bool]:
 
 
 def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
-    fields = ["gpu_index", "sleep_low", "sleep_high", "high_temp_threshold"]
+    fields = ["gpu_index", "sleep_low", "sleep_high", "sleep_max", "high_temp_threshold", "smooth_enabled"]
     if key in (curses.KEY_UP, ord("k")):
         state.field_index = (state.field_index - 1) % len(fields)
         return False, False
@@ -460,6 +532,12 @@ def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
         state.field_index = (state.field_index + 1) % len(fields)
         return False, False
     attr = fields[state.field_index]
+    if attr == "smooth_enabled":
+        if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l"), ord(" "), 10, 13, curses.KEY_ENTER):
+            state.smooth_enabled = not state.smooth_enabled
+            state.mark_modified()
+            state.ensure_custom_preset()
+        return False, False
     if key in (curses.KEY_LEFT, ord("h")):
         adjust_runtime_value(state, attr, -1)
     elif key in (curses.KEY_RIGHT, ord("l")):
@@ -476,7 +554,7 @@ def adjust_runtime_value(state: CurveState, attr: str, delta: int) -> None:
     value += delta
     if attr == "gpu_index":
         value = max(0, value)
-    elif attr in ("sleep_low", "sleep_high"):
+    elif attr in ("sleep_low", "sleep_high", "sleep_max"):
         value = max(1, value)
     elif attr == "high_temp_threshold":
         value = clamp(value, TEMP_MIN, TEMP_MAX)
@@ -572,7 +650,7 @@ def curses_main(stdscr: "curses._CursesWindow", state: CurveState) -> Tuple[bool
     global ACTIVE_SCREEN
     ACTIVE_SCREEN = stdscr
     curses.curs_set(0)
-    stdscr.nodelay(False)
+    stdscr.timeout(1000)  # wake once a second to refresh the live marker
     stdscr.keypad(True)
     if curses.has_colors():
         curses.start_color()
@@ -587,7 +665,7 @@ def curses_main(stdscr: "curses._CursesWindow", state: CurveState) -> Tuple[bool
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="TUI configurator for nvidia-fan-controlV2")
+    parser = argparse.ArgumentParser(description="TUI configurator for NVIDIA Fan Control")
     parser.add_argument("--config", default=CONFIG_PATH, help="Path to configuration file (default: %(default)s)")
     args = parser.parse_args()
 
@@ -617,19 +695,19 @@ def main() -> int:
             if parent_cli:
                 suggested = parent_cli
             else:
-                cli_name = Path(sys.argv[0]).name or "nvidia_fan_controlV2"
+                cli_name = Path(sys.argv[0]).name or "nvfc"
                 suggested = shutil.which(cli_name) or cli_name
             cli_name = Path(suggested).name
             print(
                 "Failed to save configuration: insufficient permissions to write to "
                 f"{config_path}.\n"
                 "Re-run the configurator with elevated privileges, for example:\n"
-                f"  sudo {suggested} --re-configure"
+                f"  sudo {suggested} configure"
             )
             if shutil.which(cli_name):
                 print(
                     "If sudo still cannot find the command, provide its full path, e.g.:\n"
-                    f"  sudo $(command -v {cli_name}) --re-configure"
+                    f"  sudo $(command -v {cli_name}) configure"
                 )
             return 1
         except OSError as exc:

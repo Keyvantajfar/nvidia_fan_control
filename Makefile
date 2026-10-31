@@ -1,46 +1,39 @@
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
-LDLIBS ?=
+LDLIBS ?= -ldl
 
-SRC := src/daemon.c src/config.c src/log.c
+VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
+CFLAGS += -DNVFC_VERSION=\"$(VERSION)\"
+
+SRC := src/daemon.c src/config.c src/log.c src/nvml_dl.c
 BUILD_DIR := build
-BINARY := $(BUILD_DIR)/nvidia_fan_controlV2d
+BINARY := $(BUILD_DIR)/nvidia-fan-controld
 
+# NVML is loaded at runtime (dlopen), so no NVIDIA dev headers are needed.
+# USE_MOCK_NVML=1 builds the daemon against the mock library for tests.
 ifeq ($(USE_MOCK_NVML),1)
-MOCK_DIR := mock_nvml
-MOCK_LIB := $(MOCK_DIR)/libnvidia-ml.so
+MOCK_LIB := mock_nvml/libnvidia-ml.so
 MOCK_COPY := $(BUILD_DIR)/mock_nvml/libnvidia-ml.so
+CFLAGS += -DNVFC_MOCK_NVML -DNVFC_MOCK_NVML_PATH=\"$(abspath $(MOCK_COPY))\"
+MOCK_DEPS := $(MOCK_COPY)
 
-CFLAGS += -I$(MOCK_DIR)
-LDFLAGS += -L$(BUILD_DIR)/mock_nvml -Wl,-rpath,'$$ORIGIN/mock_nvml'
-LDLIBS += -lnvidia-ml
+$(MOCK_LIB): mock_nvml/libnvidia-ml.c mock_nvml/nvml.h
+	$(MAKE) -C mock_nvml
 
-$(MOCK_LIB):
-	$(MAKE) -C $(MOCK_DIR)
-
-$(MOCK_COPY): $(MOCK_LIB) | $(BUILD_DIR)
+$(MOCK_COPY): $(MOCK_LIB)
 	mkdir -p $(BUILD_DIR)/mock_nvml
 	cp $(MOCK_LIB) $(MOCK_COPY)
-
-MOCK_DEPS := $(MOCK_COPY)
 else
-LDLIBS += -lnvidia-ml
 MOCK_DEPS :=
-endif
-
-ifneq ($(strip $(NVML_INCLUDE_DIR)),)
-CFLAGS += -I$(NVML_INCLUDE_DIR)
 endif
 
 .PHONY: build
 build: $(BINARY)
 
-$(BINARY): $(SRC) $(MOCK_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDFLAGS) $(LDLIBS)
-
-$(BUILD_DIR):
+$(BINARY): $(SRC) src/config.h src/log.h src/nvml_dl.h VERSION $(MOCK_DEPS)
 	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDFLAGS) $(LDLIBS)
 
 .PHONY: test
 test:
@@ -50,4 +43,4 @@ test:
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f tests/*.log tests/*.tmp
+	rm -f mock_nvml/libnvidia-ml.so tests/*.log tests/*.tmp
