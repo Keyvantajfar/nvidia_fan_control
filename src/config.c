@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "log.h"
 
@@ -103,7 +104,39 @@ void nvfc_set_defaults(NvfcConfig *cfg) {
     cfg->gpu_index = 0;
     cfg->sleep_low = 5;
     cfg->sleep_high = 2;
+    cfg->sleep_max = 10;
     cfg->high_temp_threshold = 42;
+    cfg->smooth_enabled = 1;
+    cfg->smooth_deadband = 3;
+    cfg->smooth_down_hold = 15;
+    cfg->smooth_down_step = 5;
+    cfg->smooth_emergency_temp = 85;
+}
+
+static int nvfc_parse_bool(const char *value, int *out) {
+    static const char *const yes[] = {"1", "on", "yes", "true", "enabled"};
+    static const char *const no[] = {"0", "off", "no", "false", "disabled"};
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); ++i) {
+        if (strcasecmp(value, yes[i]) == 0) {
+            *out = 1;
+            return 0;
+        }
+    }
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); ++i) {
+        if (strcasecmp(value, no[i]) == 0) {
+            *out = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int nvfc_clamp_warn(const char *key, int value, int lo, int hi, const char *path) {
+    int clamped = value < lo ? lo : (value > hi ? hi : value);
+    if (clamped != value) {
+        nvfc_log_warn("%s clamped to %d (got %d) in %s", key, clamped, value, path);
+    }
+    return clamped;
 }
 
 int nvfc_load_config(const char *path, NvfcConfig *cfg) {
@@ -197,6 +230,8 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
                     parsed_value = NVFC_SLEEP_MIN;
                 }
                 result.sleep_high = parsed_value;
+            } else if (strcmp(key, "sleep_max") == 0) {
+                result.sleep_max = nvfc_clamp_warn("sleep_max", parsed_value, NVFC_SLEEP_MIN, 600, path);
             } else if (strcmp(key, "high_temp_threshold") == 0) {
                 if (parsed_value < NVFC_TEMP_MIN || parsed_value > NVFC_TEMP_MAX) {
                     int clamped = parsed_value < NVFC_TEMP_MIN ? NVFC_TEMP_MIN : NVFC_TEMP_MAX;
@@ -204,6 +239,28 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
                     parsed_value = clamped;
                 }
                 result.high_temp_threshold = parsed_value;
+            }
+        } else if (strcmp(section, "smooth") == 0) {
+            if (strcmp(key, "enabled") == 0) {
+                int flag = 0;
+                if (nvfc_parse_bool(value, &flag) == 0) {
+                    result.smooth_enabled = flag;
+                } else {
+                    nvfc_log_warn("Invalid boolean for smooth.enabled in %s", path);
+                }
+            } else {
+                int v = 0;
+                if (nvfc_parse_int(value, &v) != 0) {
+                    nvfc_log_warn("Invalid integer for %s in %s", key, path);
+                } else if (strcmp(key, "deadband") == 0) {
+                    result.smooth_deadband = nvfc_clamp_warn("deadband", v, 1, 25, path);
+                } else if (strcmp(key, "down_hold") == 0) {
+                    result.smooth_down_hold = nvfc_clamp_warn("down_hold", v, 0, 600, path);
+                } else if (strcmp(key, "down_step") == 0) {
+                    result.smooth_down_step = nvfc_clamp_warn("down_step", v, 1, 50, path);
+                } else if (strcmp(key, "emergency_temp") == 0) {
+                    result.smooth_emergency_temp = nvfc_clamp_warn("emergency_temp", v, NVFC_TEMP_MIN, NVFC_TEMP_MAX, path);
+                }
             }
         }
     }
@@ -255,6 +312,10 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
 
     if (!have_run_section) {
         nvfc_log_warn("[run] section missing in %s; using defaults for runtime options", path);
+    }
+
+    if (result.sleep_max < result.sleep_low) {
+        result.sleep_max = result.sleep_low;
     }
 
     *cfg = result;

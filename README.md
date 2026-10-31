@@ -1,189 +1,172 @@
-# NVIDIA Fan Control V0
-## UNDER HEAVY DEVELOPMENT (PLEASE CONTRIBUTE LOL)
-Has been ONLY tested on a single fan RTX 3090!
-I take no responsibility for whatsoever.
+# NVIDIA Fan Control 1.0
+
+A small, quiet fan-curve daemon for NVIDIA GPUs on Linux (NVML, systemd), with a
+terminal configurator. Written to be gentle: it wakes up rarely when the GPU is
+idle, and it writes to the fan controller only when a change actually matters.
+
+> Tested only on a single-fan RTX 3090. Use at your own risk; no warranty.
 
 ![Fun Test](images/FAN_CONTROL.JPG)
 
-
-This repository ships an NVML-based fan control daemon, a curses configurator,
-installer scripts, and a helper CLI. The v3 runtime refactor loads fan curves
-from an INI file at start-up and on `SIGHUP`, eliminating the old compile-time
-configuration step.
-
-## Features
-- Reloadable runtime configuration with clamping and validation.
-- Low-overhead fan control loop with adaptive sleeps and light hysteresis.
-- Full-screen TUI for editing 3–7 curve points plus runtime options.
-- Installer and CLI wrappers for systemd-based deployments.
-- Mock NVML backend and automated tests for hardware-free verification.
-
-## Repository Layout
-```
-.
-├── bin/                      # CLI wrapper installed to /usr/local/bin/
-├── build/                    # Generated binaries (ignored until built)
-├── docs/                     # Additional documentation
-├── installer.sh              # Install script (runs TUI if config missing)
-├── mock_nvml/                # Optional mock NVML headers + shared library
-├── src/                      # Daemon and support modules
-├── systemd/                  # Service unit file
-├── tests/                    # Automated test scripts & configs
-├── tui/nvfc_tui.py           # curses-based configurator
-└── uninstall.sh              # Removes installed files and service
-```
-
-## Requirements
-- Python 3.8+
-- `gcc` and the NVIDIA NVML development libraries (`libnvidia-ml.so`, `nvml.h`)
-  when building for real hardware
-- `make`
-- Root access for installation (the script will re-invoke via `sudo` when needed)
-
-## Quick Start – Real Hardware
-1. Ensure the NVIDIA driver stack is installed so that `libnvidia-ml.so` and
-   `nvml.h` are available to the compiler. The installer will attempt to locate
-   `nvml.h` under common include directories automatically and will let you
-   choose between multiple matches when found; set
-   `NVML_INCLUDE_DIR=/path/to/dir` beforehand to override or skip the search.
-2. Run the installer (it elevates with `sudo` if necessary):
-   ```sh
-   ./installer.sh
-   ```
-   - If `/etc/nvidia-fan-controlV2.conf` does not exist, the curses TUI opens so
-     you can create or edit the curve before the daemon is built.
-   - The installer now calls `make build` to compile `src/` into
-     `build/nvidia_fan_controlV2d`, then installs:
-     - `/usr/local/sbin/nvidia_fan_controlV2d`
-     - `/usr/local/bin/nvidia_fan_controlV2`
-     - `/etc/nvidia-fan-controlV2.conf`
-     - `/etc/systemd/system/nvidia-fan-controlV2.service`
-3. Reload systemd (handled automatically when available) and enable the service:
-   ```sh
-   sudo systemctl enable --now nvidia-fan-controlV2
-   ```
-4. View live logs:
-   ```sh
-   nvidia_fan_controlV2
-   ```
-
-### Reconfiguring at Runtime
-- Launch the TUI and reload without rebuilding:
-  ```sh
-  sudo nvidia_fan_controlV2 --re-configure
-  ```
-- Apply changes from an already edited config file:
-  ```sh
-  sudo nvidia_fan_controlV2 --apply
-  ```
-- Restart or inspect the service as needed:
-  ```sh
-  nvidia_fan_controlV2 --restart
-  nvidia_fan_controlV2 --status
-  ```
-
-## Testing Without Hardware (Mock NVML)
-A mock NVML implementation in `mock_nvml/` lets you exercise the daemon and
-scripts end-to-end.
-
-- Build and run the automated suite:
-  ```sh
-  USE_MOCK_NVML=1 make test
-  ```
-- The mock library logs fan updates under `${NVML_MOCK_DIR:-/tmp/nvml-mock}/fan_speed.log`
-  for manual inspection.
-
-### Manual Reload / Reconfigure Drill
-You can confirm that editing the config file and signalling the daemon applies
-changes without a rebuild by running the helper script:
+## Install
 
 ```sh
-./scripts/mock_reconfigure_drill.sh
+./installer.sh
 ```
 
-The script performs the following steps:
+That is all. It checks for `gcc`, `make` and `python3`, builds, installs,
+enables and starts the service, and writes a default config if you have none.
+Re-running upgrades in place and keeps your config; an old "V2" install is
+migrated automatically. No NVIDIA dev headers are needed (NVML is loaded from the
+driver at runtime). Options: `--no-start`, `--configure`.
 
-- Builds the daemon against the mock NVML library (`USE_MOCK_NVML=1 make build`).
-- Creates an isolated scratch directory containing the default six-point curve
-  from `tests/reload_initial.conf` (the same values the daemon falls back to
-  when parsing fails).
-- Starts the daemon in the background with stdout/err captured to
-  `$TMPDIR/daemon.log` and writes an environment helper to `$TMPDIR/env.sh` so
-  additional terminals can join the session (`source "$TMPDIR/env.sh"`).
+Remove with `./uninstall.sh` (keeps your config) or `./uninstall.sh --purge`.
 
-Once the script prints the session banner, you can:
+## Use
 
-~~0. Launch the TUI against the generated config:~~
-   ~~source "$TMPDIR/env.sh"~~
-   ~~python3 tui/nvfc_tui.py --config "$CONFIG_PATH"~~
-   
-1. Do what the script says to source Launch the TUI against the generated config:
-   ```sh
-   source "$TMPDIR(script already gives you this you dont have it in other terminals)/env.sh"
-   python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
-   ```
+Run from anywhere:
 
-   Edit a point and save to write the updated curve.
-2. Drive the mock daemon while the TUI is open:
-   ```sh
-   mock_nvml/mockctl.sh set-temp 55
-   mock_nvml/mockctl.sh tail-log
-   ```
-3. Signal the running daemon so it reloads the updated curve:
-   ```sh
-   kill -HUP "$DAEMON_PID"
-   ```
-4. Inspect `$TMPDIR/daemon.log` or the mock `fan_speed.log` for the
-   `Reloaded config` message and new speeds. When finished, stop the process and
-   delete the scratch directory:
-   ```sh
-   kill "$DAEMON_PID"
-   rm -rf "$TMPDIR"
-   ```
+| Command | What it does |
+|---|---|
+| `nvfc` | Open the configurator (asks for sudo itself), save, and reload the daemon. |
+| `nvfc status` | Live GPU temperature, fan speed, target, polling interval. |
+| `nvfc logs` | Follow the daemon log. |
+| `nvfc apply` | Reload an edited config file without opening the TUI. |
+| `nvfc restart` | Restart the service. |
+| `nvfc --version` | Print the version. |
 
-On a real install the helper CLI performs the same steps when you run
-`sudo nvidia_fan_controlV2 --re-configure` (it saves via the TUI and issues
-`systemctl reload`).
+`nvidia-fan-control` works as an alias for `nvfc`. The old `--re-configure`,
+`--status`, `--restart` and `--apply` flags still work.
 
-## Wrapper CLI Reference
-`nvidia_fan_controlV2` accepts the following options:
+### The configurator
+`↑/↓` pick a point, `←/→` change its temperature or speed, `TAB` switches
+between temp / speed / runtime settings, `SPACE` grabs a point to reorder,
+`A`/`R` add or remove points (3–7), `T` presets, `S` save, `Q` quit. In the
+runtime pane, `←/→` or `SPACE` toggles **Smart Smooth**. While the daemon runs,
+the plot shows a live `@` marker at the current temperature and fan speed.
 
-| Command | Description |
-|---------|-------------|
-| _no args_ | Tail journal logs (`journalctl -u nvidia-fan-controlV2 -f -o cat`). |
-| `--re-configure` | Launch the TUI, save the config, and reload the service. |
-| `--apply` | Reload the service configuration without opening the TUI. |
-| `--restart` | Restart the systemd service. |
-| `--status` | Show `systemctl status` output. |
+## Smart Smooth
 
-## Configuration File
-The daemon reads `/etc/nvidia-fan-controlV2.conf` (or the path supplied via
-`--config`/`NVFC_CONFIG_PATH`) on start-up and when it receives `SIGHUP`.
-Example:
-```
+With the classic stepped curve, a point at 70 °C that jumps from 50 % to 62 %
+makes the fan flip-flop whenever the GPU hovers around 69–70 °C. Smart Smooth
+turns your 3–7 points into a smooth curve and keeps the fan calm:
+
+1. **Interpolation** – straight lines between your points, so 69→70 °C is a ~1 %
+   change instead of a 12 % cliff.
+2. **Temperature filter** – rises are followed quickly, falls slowly, so sensor
+   jitter does not move the fan.
+3. **Deadband** – speed changes smaller than `deadband` % are never written.
+   *This* (together with the filter) is what cuts writes to the controller;
+   interpolation alone would write every degree.
+4. **Held, stepped ramp-down** – a lower target must persist for `down_hold`
+   seconds, then the fan drops at most `down_step` % per write. Increases are
+   immediate.
+5. **Emergency bypass** – at or above `emergency_temp` smoothing is skipped and
+   the curve applies instantly.
+
+Turn it off (`enabled = off`) for the classic stepped behaviour; changes are then
+limited to ≥4 % steps at least 4 s apart.
+
+## Adaptive polling
+
+Reading the temperature is cheap; writing fan speeds is what touches the fan
+controller, so the daemon minimises writes and also polls less when nothing is
+happening. While the GPU is **below `high_temp_threshold`** and within ±2 °C, the
+interval doubles from `sleep_low` up to `sleep_max`. Any 2 °C move, a pending
+ramp-down, or temperatures at/above the threshold returns it to the fast
+interval (`sleep_low`, or `sleep_high` when hot) immediately. To poll faster when
+idle, lower `sleep_max`.
+
+## Configuration
+
+`/etc/nvidia-fan-control.conf` (or `--config <path>` / `NVFC_CONFIG_PATH`),
+read at start-up and on reload (`nvfc apply` / `SIGHUP`):
+
+```ini
 [curve]
-temps = 0,40,55,67,75,85
-speeds = 25,30,45,65,78,99
+temps = 0,40,55,67,75,85       # strictly increasing, 3-7 points, 0-120 °C
+speeds = 25,30,45,65,78,99     # 0-100 %
 
 [run]
 gpu_index = 0
-sleep_low = 5
-sleep_high = 2
+sleep_low = 5                  # poll interval when cool (seconds)
+sleep_high = 2                 # poll interval at/above high_temp_threshold
+sleep_max = 10                 # longest interval when cool and stable
 high_temp_threshold = 42
+
+[smooth]
+enabled = on
+deadband = 3                   # ignore speed changes below this (%)
+down_hold = 15                 # seconds a lower target must persist
+down_step = 5                  # max % dropped per ramp-down write
+emergency_temp = 85            # smoothing bypassed at/above this
 ```
 
-Fan curves are clamped to 0–120 °C and 0–100 % during parsing. Temperatures must
-remain strictly increasing, otherwise the daemon falls back to defaults while
-preserving the runtime options from `[run]`.
+Invalid values are clamped with a warning. An invalid curve falls back to the
+built-in default curve and keeps your `[run]`/`[smooth]` options. When the service
+stops, the fan is handed back to the driver's automatic control.
 
-## Additional Notes
-- Runtime changes and smoothing behaviour are summarised in
-  `docs/CHANGES_RUNTIME_CONFIG.md`.
-- To uninstall everything:
-  ```sh
-  sudo ./uninstall.sh
-  ```
+## Development
 
-# TODO
-- Add multi-fan control capability (preferably all fans of a single GPU at the same time)
-- Test on different GPUs
+```sh
+make USE_MOCK_NVML=1 build   # build against the mock NVML library
+make test                    # run the test suite (mock GPU, no hardware)
+./scripts/mock_reconfigure_drill.sh   # interactive reload drill
+```
+
+`mock_nvml/` is a fake NVML library driven by files in `$NVML_MOCK_DIR`
+(`mock_nvml/mockctl.sh set-temp 70`). Fan writes are logged to
+`$NVML_MOCK_DIR/fan_speed.log`. Layout: `src/` daemon, `bin/nvfc` CLI,
+`tui/` configurator, `systemd/` unit, `tests/`, `docs/CHANGELOG.md`.
+
+### Manual test demo
+
+```sh
+mkdir -p /tmp/nvfc-test
+cat > /tmp/nvfc-test/test.conf <<'EOF'
+[curve]
+temps = 0,60,70,85
+speeds = 35,50,62,99
+
+[run]
+sleep_low = 2
+sleep_high = 2
+sleep_max = 8
+high_temp_threshold = 42
+
+[smooth]
+enabled = on
+EOF
+echo 69 > /tmp/nvfc-test/temperature
+```
+
+**Terminal 1.** Start the daemon and watch its log:
+
+```sh
+NVML_MOCK_DIR=/tmp/nvfc-test NVFC_STATUS_PATH=/tmp/nvfc-test/status \
+  ./build/nvidia-fan-controld --config /tmp/nvfc-test/test.conf
+```
+
+**Terminal 2.** Fake the temperature by writing a number to the file, and watch the fan writes:
+
+```sh
+export NVML_MOCK_DIR=/tmp/nvfc-test
+mock_nvml/mockctl.sh set-temp 70      # same as: echo 70 > /tmp/nvfc-test/temperature
+mock_nvml/mockctl.sh tail-log         # each line is a real fan write
+```
+
+Handy checks:
+- **Flapping test.** Run `while true; do echo 70 > /tmp/nvfc-test/temperature; sleep 2; echo 69 > /tmp/nvfc-test/temperature; sleep 2; done`. The daemon should write about once and then stay quiet.
+- **Climb test.** Set 75, then 90. The fan should go up promptly, and at 90 jump straight to 99 (emergency, no smoothing).
+- **Cool-down test.** Set 40. Nothing happens for about 15 s, then the fan steps down at most 5% at a time.
+- **Backoff test.** Leave the temperature at 35. The status file's `interval=` value (`cat /tmp/nvfc-test/status`) climbs 2 → 4 → 8, and snaps back to 2 as soon as you raise the temperature by 2 °C.
+- **Smoothing off.** Set `enabled = off` in the config and run `kill -HUP $(pgrep nvidia-fan-controld)`. The daemon reloads and switches to the old stepped behaviour.
+
+If you'd rather skip the setup, `./scripts/mock_reconfigure_drill.sh` builds the mock and starts a daemon for you, then prints the commands to join its session. You can also run `make test` for the automated suite.
+
+On the real GPU you don't need any of this. After `./installer.sh`, use `nvfc status` to see live temperature, fan and polling interval, and `nvfc logs` to follow the daemon's log.
+
+
+## TODO
+- Multi-fan control (all fans of one GPU together). Currently fan 0 only.
+- Test on more GPUs.

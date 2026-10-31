@@ -1,0 +1,20 @@
+# Systemd unit for NVIDIA Fan Control
+# Installed to /etc/systemd/system/nvidia-fan-control.service by installer.sh
+[Unit]
+Description=NVIDIA Fan Control
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/nvidia-fan-controld
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# Live status file (/run/nvidia-fan-control/status) for `nvfc status` and the TUI.
+RuntimeDirectory=nvidia-fan-control
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

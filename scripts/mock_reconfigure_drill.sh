@@ -22,7 +22,7 @@ cp "$ROOT_DIR/tests/reload_initial.conf" "$CONFIG_PATH"
 pushd "$ROOT_DIR" >/dev/null
 USE_MOCK_NVML=1 make build
 nohup env NVML_MOCK_DIR="$MOCK_DIR" NVFC_CONFIG_PATH="$CONFIG_PATH" \
-  ./build/nvidia_fan_controlV2d >"$LOG_PATH" 2>&1 &
+  ./build/nvidia-fan-controld >"$LOG_PATH" 2>&1 &
 DAEMON_PID=$!
 popd >/dev/null
 
@@ -30,7 +30,7 @@ printf 'export DAEMON_PID=%q\n' "$DAEMON_PID" >>"$ENV_PATH"
 
 cat <<MESSAGE
 ################################################################################
-# NVIDIA Fan Control V2 – Mock Reload Drill                                    #
+# NVIDIA Fan Control – Mock Reload Drill                                       #
 ################################################################################
 
 Scratch directory : $SESSION_DIR
@@ -44,11 +44,9 @@ To join the session in another shell:
   source "$ENV_PATH"
 
 Then run the TUI against the config, edit, and save:
-  # python3 $ROOT_DIR/tui/nvfc_tui.py --config "\$CONFIG_PATH"
   python3 tui/nvfc_tui.py --config "$CONFIG_PATH"
 
 Drive the mock backend while editing:
-  # $ROOT_DIR/mock_nvml/mockctl.sh set-temp 55
   mock_nvml/mockctl.sh set-temp 55
   $ROOT_DIR/mock_nvml/mockctl.sh tail-log
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-BINARY="$ROOT_DIR/build/nvidia_fan_controlV2d"
+BINARY="$ROOT_DIR/build/nvidia-fan-controld"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
