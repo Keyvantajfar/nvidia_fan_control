@@ -119,6 +119,54 @@ make test                    # run the test suite (mock GPU, no hardware)
 `$NVML_MOCK_DIR/fan_speed.log`. Layout: `src/` daemon, `bin/nvfc` CLI,
 `tui/` configurator, `systemd/` unit, `tests/`, `docs/CHANGELOG.md`.
 
+### Manual test demo
+
+```sh
+mkdir -p /tmp/nvfc-test
+cat > /tmp/nvfc-test/test.conf <<'EOF'
+[curve]
+temps = 0,60,70,85
+speeds = 35,50,62,99
+
+[run]
+sleep_low = 2
+sleep_high = 2
+sleep_max = 8
+high_temp_threshold = 42
+
+[smooth]
+enabled = on
+EOF
+echo 69 > /tmp/nvfc-test/temperature
+```
+
+**Terminal 1.** Start the daemon and watch its log:
+
+```sh
+NVML_MOCK_DIR=/tmp/nvfc-test NVFC_STATUS_PATH=/tmp/nvfc-test/status \
+  ./build/nvidia-fan-controld --config /tmp/nvfc-test/test.conf
+```
+
+**Terminal 2.** Fake the temperature by writing a number to the file, and watch the fan writes:
+
+```sh
+export NVML_MOCK_DIR=/tmp/nvfc-test
+mock_nvml/mockctl.sh set-temp 70      # same as: echo 70 > /tmp/nvfc-test/temperature
+mock_nvml/mockctl.sh tail-log         # each line is a real fan write
+```
+
+Handy checks:
+- **Flapping test.** Run `while true; do echo 70 > /tmp/nvfc-test/temperature; sleep 2; echo 69 > /tmp/nvfc-test/temperature; sleep 2; done`. The daemon should write about once and then stay quiet.
+- **Climb test.** Set 75, then 90. The fan should go up promptly, and at 90 jump straight to 99 (emergency, no smoothing).
+- **Cool-down test.** Set 40. Nothing happens for about 15 s, then the fan steps down at most 5% at a time.
+- **Backoff test.** Leave the temperature at 35. The status file's `interval=` value (`cat /tmp/nvfc-test/status`) climbs 2 → 4 → 8, and snaps back to 2 as soon as you raise the temperature by 2 °C.
+- **Smoothing off.** Set `enabled = off` in the config and run `kill -HUP $(pgrep nvidia-fan-controld)`. The daemon reloads and switches to the old stepped behaviour.
+
+If you'd rather skip the setup, `./scripts/mock_reconfigure_drill.sh` builds the mock and starts a daemon for you, then prints the commands to join its session. You can also run `make test` for the automated suite.
+
+On the real GPU you don't need any of this. After `./installer.sh`, use `nvfc status` to see live temperature, fan and polling interval, and `nvfc logs` to follow the daemon's log.
+
+
 ## TODO
 - Multi-fan control (all fans of one GPU together). Currently fan 0 only.
 - Test on more GPUs.
