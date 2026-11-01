@@ -7,7 +7,10 @@ First release under one version number (previously a mix of "V0", "v3" and "V2")
 - **Smart Smooth** (on by default, one switch in the TUI/config). Draws straight
   lines between your curve points instead of a staircase, filters the
   temperature (rises followed fast, falls slowly), ignores speed changes under a
-  deadband, and ramps down in small held steps. Result: far fewer fan writes and
+  deadband, and ramps down in held steps. `ramp_down = quick | balanced | slow`
+  sets how fast the fan comes down after a sudden cool-down (default `balanced`;
+  `slow` is the original gentle behaviour). Numbers can still be set directly with
+  `down_hold`, `down_step` and `down_interval`. Result: far fewer fan writes and
   no flapping around a steep point. Bypassed at `emergency_temp`.
 - **Adaptive polling** (`sleep_max`): the poll interval doubles while the GPU is
   cool and quiet, and snaps back to fast on any 2 °C move or above
