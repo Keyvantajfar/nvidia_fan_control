@@ -1,7 +1,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
-LDLIBS ?= -ldl
+LDLIBS ?= -ldl -lm
 
 VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
 CFLAGS += -DNVFC_VERSION=\"$(VERSION)\"

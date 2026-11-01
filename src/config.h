@@ -18,10 +18,20 @@ typedef struct {
     /* Smart Smooth */
     int smooth_enabled;       /* 1 = interpolate + filter, 0 = classic stepped curve */
     int smooth_deadband;      /* ignore speed changes smaller than this (%) */
-    int smooth_down_hold;     /* seconds a lower target must persist before ramping down */
+    int smooth_ramp;          /* ramp-down level: 0 slow, 1 balanced, 2 quick */
+    int smooth_ramp_custom;   /* 1 if hold/step/interval were overridden in the file */
+    int smooth_decay_tau;     /* seconds: how slowly the filter follows a falling temperature */
+    int smooth_down_hold;     /* seconds a lower target must persist before the first drop */
     int smooth_down_step;     /* max % the fan drops per ramp-down write */
+    int smooth_down_interval; /* seconds between successive ramp-down writes */
     int smooth_emergency_temp;/* at/above this temperature smoothing is bypassed */
 } NvfcConfig;
+
+#define NVFC_RAMP_SLOW 0
+#define NVFC_RAMP_BALANCED 1
+#define NVFC_RAMP_QUICK 2
+
+const char *nvfc_ramp_name(int level);
 
 void nvfc_set_defaults(NvfcConfig *cfg);
 int  nvfc_load_config(const char *path, NvfcConfig *cfg);  // 0 on success
