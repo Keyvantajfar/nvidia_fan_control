@@ -15,7 +15,8 @@ Key bindings (also shown in the UI):
     S     Save
     Q     Quit without saving
 
-In the runtime settings pane, ←/→ (or SPACE) toggles Smart Smooth.  While the
+In the runtime settings pane, ←/→ (or SPACE) toggles Smart Smooth and picks the
+ramp-down level (quick / balanced / slow).  While the
 daemon runs, the plot shows a live @ marker for the current temperature/fan.
 
 The TUI persists configuration to /etc/nvidia-fan-control.conf as a simple INI
@@ -65,8 +66,10 @@ DEFAULT_RUN_SETTINGS = {
     "high_temp_threshold": 42,
 }
 
-# Advanced Smart Smooth keys: not shown in the UI, but preserved on save.
-DEFAULT_SMOOTH_EXTRA = {"deadband": "3", "down_hold": "15", "down_step": "5", "emergency_temp": "85"}
+# Advanced Smart Smooth keys: not shown in the UI. Only keys already present in
+# the file are kept (and written back); anything absent stays at the level default.
+SMOOTH_EXTRA_KEYS = ("deadband", "down_hold", "down_step", "down_interval", "emergency_temp")
+RAMP_LEVELS = ["quick", "balanced", "slow"]
 
 
 def read_version() -> str:
@@ -120,7 +123,8 @@ class CurveState:
     sleep_max: int = DEFAULT_RUN_SETTINGS["sleep_max"]
     high_temp_threshold: int = DEFAULT_RUN_SETTINGS["high_temp_threshold"]
     smooth_enabled: bool = True
-    smooth_extra: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SMOOTH_EXTRA))
+    ramp_down: str = "balanced"
+    smooth_extra: Dict[str, str] = field(default_factory=dict)
     selected_index: int = 0
     focus_axis: int = 0  # 0 -> temperature, 1 -> speed
     focus_area: str = "points"  # "points" or "fields"
@@ -143,6 +147,7 @@ class CurveState:
             sleep_max=self.sleep_max,
             high_temp_threshold=self.high_temp_threshold,
             smooth_enabled=self.smooth_enabled,
+            ramp_down=self.ramp_down,
             smooth_extra=dict(self.smooth_extra),
             selected_index=self.selected_index,
             focus_axis=self.focus_axis,
@@ -193,8 +198,18 @@ def load_config(path: str) -> CurveState:
         "run", "high_temp_threshold", fallback=DEFAULT_RUN_SETTINGS["high_temp_threshold"]
     )
     state.smooth_enabled = parser.getboolean("smooth", "enabled", fallback=True)
-    for key in DEFAULT_SMOOTH_EXTRA:
-        state.smooth_extra[key] = parser.get("smooth", key, fallback=DEFAULT_SMOOTH_EXTRA[key])
+    ramp = parser.get("smooth", "ramp_down", fallback="balanced").strip().lower()
+    state.ramp_down = ramp if ramp in RAMP_LEVELS else "balanced"
+    for key in SMOOTH_EXTRA_KEYS:
+        if parser.has_option("smooth", key):
+            state.smooth_extra[key] = parser.get("smooth", key)
+    # Configs saved by 1.0.0 contain these two as plain defaults; they would
+    # override the ramp_down level, so treat that exact pair as "not customised".
+    has_ramp_key = parser.has_option("smooth", "ramp_down")
+    if (not has_ramp_key and state.smooth_extra.get("down_hold") == "15"
+            and state.smooth_extra.get("down_step") == "5"):
+        del state.smooth_extra["down_hold"]
+        del state.smooth_extra["down_step"]
     # Try to detect matching template
     for name, (temps_template, speeds_template) in TEMPLATES.items():
         if temps_template is None:
@@ -223,7 +238,11 @@ def save_config(path: str, state: CurveState) -> None:
         "sleep_max": str(state.sleep_max),
         "high_temp_threshold": str(state.high_temp_threshold),
     }
-    parser["smooth"] = {"enabled": "on" if state.smooth_enabled else "off", **state.smooth_extra}
+    parser["smooth"] = {
+        "enabled": "on" if state.smooth_enabled else "off",
+        "ramp_down": state.ramp_down,
+        **state.smooth_extra,
+    }
     with open(path, "w", encoding="utf-8") as fp:
         parser.write(fp)
 
@@ -292,6 +311,7 @@ def draw_run_settings(stdscr: "curses._CursesWindow", start_row: int, width: int
         ("Sleep max (s)", state.sleep_max),
         ("High temp threshold", state.high_temp_threshold),
         ("Smart Smooth", "ON " if state.smooth_enabled else "OFF"),
+        ("Ramp-down", state.ramp_down),
     ]
     for idx, (label, value) in enumerate(labels):
         highlight = curses.A_REVERSE if state.focus_area == "fields" and idx == state.field_index else curses.A_NORMAL
@@ -524,7 +544,7 @@ def _handle_template_selection(state: CurveState) -> Tuple[bool, bool]:
 
 
 def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
-    fields = ["gpu_index", "sleep_low", "sleep_high", "sleep_max", "high_temp_threshold", "smooth_enabled"]
+    fields = ["gpu_index", "sleep_low", "sleep_high", "sleep_max", "high_temp_threshold", "smooth_enabled", "ramp_down"]
     if key in (curses.KEY_UP, ord("k")):
         state.field_index = (state.field_index - 1) % len(fields)
         return False, False
@@ -532,6 +552,19 @@ def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
         state.field_index = (state.field_index + 1) % len(fields)
         return False, False
     attr = fields[state.field_index]
+    if attr == "ramp_down":
+        step = None
+        if key in (curses.KEY_LEFT, ord("h")):
+            step = -1
+        elif key in (curses.KEY_RIGHT, ord("l"), ord(" "), 10, 13, curses.KEY_ENTER):
+            step = 1
+        if step is not None:
+            idx = RAMP_LEVELS.index(state.ramp_down)
+            state.ramp_down = RAMP_LEVELS[max(0, min(len(RAMP_LEVELS) - 1, idx + step))] \
+                if key not in (ord(" "), 10, 13, curses.KEY_ENTER) else RAMP_LEVELS[(idx + 1) % len(RAMP_LEVELS)]
+            state.mark_modified()
+            state.ensure_custom_preset()
+        return False, False
     if attr == "smooth_enabled":
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l"), ord(" "), 10, 13, curses.KEY_ENTER):
             state.smooth_enabled = not state.smooth_enabled

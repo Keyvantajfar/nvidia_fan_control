@@ -90,6 +90,29 @@ static int nvfc_parse_list(const char *line, int *out, size_t max_points, int mi
     return 0;
 }
 
+/* Ramp-down levels. "slow" matches the 1.0.0 behaviour. */
+static const struct {
+    const char *name;
+    int tau, hold, step, interval;
+} k_ramp[] = {
+    {"slow", 25, 15, 5, 15},
+    {"balanced", 10, 8, 8, 5},
+    {"quick", 4, 3, 15, 2},
+};
+
+const char *nvfc_ramp_name(int level) {
+    return (level >= 0 && level < 3) ? k_ramp[level].name : "custom";
+}
+
+static void nvfc_apply_ramp(NvfcConfig *cfg, int level) {
+    cfg->smooth_ramp = level;
+    cfg->smooth_ramp_custom = 0;
+    cfg->smooth_decay_tau = k_ramp[level].tau;
+    cfg->smooth_down_hold = k_ramp[level].hold;
+    cfg->smooth_down_step = k_ramp[level].step;
+    cfg->smooth_down_interval = k_ramp[level].interval;
+}
+
 void nvfc_set_defaults(NvfcConfig *cfg) {
     if (!cfg) {
         return;
@@ -108,8 +131,7 @@ void nvfc_set_defaults(NvfcConfig *cfg) {
     cfg->high_temp_threshold = 42;
     cfg->smooth_enabled = 1;
     cfg->smooth_deadband = 3;
-    cfg->smooth_down_hold = 15;
-    cfg->smooth_down_step = 5;
+    nvfc_apply_ramp(cfg, NVFC_RAMP_BALANCED);
     cfg->smooth_emergency_temp = 85;
 }
 
@@ -155,6 +177,9 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
     int have_temps = 0;
     int have_speeds = 0;
     int have_run_section = 0;
+
+    int ramp_level = -1;  /* set when ramp_down appears in the file */
+    int ov_hold = -1, ov_step = -1, ov_interval = -1;  /* explicit numeric overrides */
 
     char section[32] = "";
     char line[512];
@@ -248,6 +273,18 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
                 } else {
                     nvfc_log_warn("Invalid boolean for smooth.enabled in %s", path);
                 }
+            } else if (strcmp(key, "ramp_down") == 0) {
+                int found = -1;
+                for (int i = 0; i < 3; ++i) {
+                    if (strcasecmp(value, k_ramp[i].name) == 0) {
+                        found = i;
+                    }
+                }
+                if (found < 0) {
+                    nvfc_log_warn("ramp_down must be quick, balanced or slow (got '%s') in %s", value, path);
+                } else {
+                    ramp_level = found;
+                }
             } else {
                 int v = 0;
                 if (nvfc_parse_int(value, &v) != 0) {
@@ -255,9 +292,11 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
                 } else if (strcmp(key, "deadband") == 0) {
                     result.smooth_deadband = nvfc_clamp_warn("deadband", v, 1, 25, path);
                 } else if (strcmp(key, "down_hold") == 0) {
-                    result.smooth_down_hold = nvfc_clamp_warn("down_hold", v, 0, 600, path);
+                    ov_hold = nvfc_clamp_warn("down_hold", v, 0, 600, path);
                 } else if (strcmp(key, "down_step") == 0) {
-                    result.smooth_down_step = nvfc_clamp_warn("down_step", v, 1, 50, path);
+                    ov_step = nvfc_clamp_warn("down_step", v, 1, 100, path);
+                } else if (strcmp(key, "down_interval") == 0) {
+                    ov_interval = nvfc_clamp_warn("down_interval", v, 1, 600, path);
                 } else if (strcmp(key, "emergency_temp") == 0) {
                     result.smooth_emergency_temp = nvfc_clamp_warn("emergency_temp", v, NVFC_TEMP_MIN, NVFC_TEMP_MAX, path);
                 }
@@ -313,6 +352,14 @@ int nvfc_load_config(const char *path, NvfcConfig *cfg) {
     if (!have_run_section) {
         nvfc_log_warn("[run] section missing in %s; using defaults for runtime options", path);
     }
+
+    /* Level first, then any explicit numbers on top of it. */
+    if (ramp_level >= 0) {
+        nvfc_apply_ramp(&result, ramp_level);
+    }
+    if (ov_hold >= 0) { result.smooth_down_hold = ov_hold; result.smooth_ramp_custom = 1; }
+    if (ov_step >= 0) { result.smooth_down_step = ov_step; result.smooth_ramp_custom = 1; }
+    if (ov_interval >= 0) { result.smooth_down_interval = ov_interval; result.smooth_ramp_custom = 1; }
 
     if (result.sleep_max < result.sleep_low) {
         result.sleep_max = result.sleep_low;

@@ -10,6 +10,7 @@ TESTS=(
   test_smoothing.sh
   test_smart_smooth.sh
   test_adaptive_sleep.sh
+  test_ramp_levels.sh
   test_version.sh
 )
 

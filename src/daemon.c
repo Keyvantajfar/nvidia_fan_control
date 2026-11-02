@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <stdbool.h>
@@ -26,9 +27,10 @@
 #define NVFC_LEGACY_MIN_STEP 4
 #define NVFC_LEGACY_MIN_INTERVAL 4
 
-/* Smart Smooth temperature filter: follow rises fast, falls slowly. */
-#define NVFC_FILTER_ATTACK 0.5
-#define NVFC_FILTER_DECAY 0.1
+/* Smart Smooth temperature filter (time based, so it behaves the same whatever
+ * the poll interval): rises are followed with this time constant; the falling
+ * time constant comes from the ramp_down level. */
+#define NVFC_ATTACK_TAU 2.0
 
 /* Adaptive polling: back off only while cool and stable. */
 #define NVFC_STABLE_BAND 2       /* a move of this many degrees snaps polling back to fast */
@@ -50,6 +52,8 @@ typedef struct {
     double filt;           /* Smart Smooth filtered temperature */
     int have_filt;
     time_t down_since;     /* when a pending ramp-down was first seen, 0 = none */
+    time_t down_ready;     /* earliest time of the next ramp-down write */
+    time_t last_poll;      /* for the time-based filter */
     int anchor;            /* temperature the current quiet run started at */
     int stable;            /* consecutive quiet polls */
     int sleep_now;         /* current adaptive poll interval */
@@ -76,6 +80,7 @@ static void nvfc_reset_state(NvfcState *st) {
  * causes a write; only forget timing/backoff state. */
 static void nvfc_soft_reset_state(NvfcState *st) {
     st->down_since = 0;
+    st->down_ready = 0;
     st->stable = 0;
     st->sleep_now = 0;
     st->log_time = 0;
@@ -154,13 +159,17 @@ static int nvfc_decide(const NvfcConfig *cfg, NvfcState *st, int temp, time_t no
         return target;
     }
 
+    double dt = st->last_poll ? difftime(now, st->last_poll) : 0.0;
+    if (dt < 1.0) {
+        dt = 1.0;
+    }
+    st->last_poll = now;
     if (!st->have_filt || emergency) {
         st->filt = temp;
         st->have_filt = 1;
-    } else if (temp > st->filt) {
-        st->filt += NVFC_FILTER_ATTACK * (temp - st->filt);
     } else {
-        st->filt += NVFC_FILTER_DECAY * (temp - st->filt);
+        double tau = temp > st->filt ? NVFC_ATTACK_TAU : (double)cfg->smooth_decay_tau;
+        st->filt += (1.0 - exp(-dt / tau)) * (temp - st->filt);
     }
 
     int target = nvfc_clamp_percent((int)(nvfc_interpolate(cfg, st->filt) + 0.5));
@@ -189,18 +198,20 @@ static int nvfc_decide(const NvfcConfig *cfg, NvfcState *st, int temp, time_t no
         st->down_since = 0;
         return target;
     }
-    /* Ramp-down: lower target must persist, then drop in small steps. */
+    /* Ramp-down: the lower target must persist for down_hold, then the fan drops
+     * down_step % at a time, at most one write per down_interval. */
     if (st->down_since == 0) {
         st->down_since = now;
+        st->down_ready = now + cfg->smooth_down_hold;
     }
-    if ((int)difftime(now, st->down_since) < cfg->smooth_down_hold) {
+    if (now < st->down_ready) {
         return -1;
     }
     int next = st->fan - cfg->smooth_down_step;
     if (next < target) {
         next = target;
     }
-    st->down_since = now;
+    st->down_ready = now + cfg->smooth_down_interval;
     return next;
 }
 
@@ -260,9 +271,12 @@ static void nvfc_log_startup(const NvfcConfig *cfg) {
         NVFC_VERSION, cfg->gpu_index, cfg->num_points, temps_buf, speeds_buf,
         cfg->sleep_low, cfg->sleep_high, cfg->sleep_max, cfg->high_temp_threshold);
     if (cfg->smooth_enabled) {
-        nvfc_log_info("Smart Smooth: on (deadband=%d%%, down_hold=%ds, down_step=%d%%, emergency_temp=%d°C)",
-                      cfg->smooth_deadband, cfg->smooth_down_hold, cfg->smooth_down_step,
-                      cfg->smooth_emergency_temp);
+        nvfc_log_info("Smart Smooth: on (deadband=%d%%, emergency_temp=%d°C, ramp_down=%s%s: hold=%ds, "
+                      "step=%d%% every %ds, filter=%ds)",
+                      cfg->smooth_deadband, cfg->smooth_emergency_temp,
+                      nvfc_ramp_name(cfg->smooth_ramp), cfg->smooth_ramp_custom ? "+custom" : "",
+                      cfg->smooth_down_hold, cfg->smooth_down_step, cfg->smooth_down_interval,
+                      cfg->smooth_decay_tau);
     } else {
         nvfc_log_info("Smart Smooth: off (stepped curve, min_step=%d%%, min_interval=%ds)",
                       NVFC_LEGACY_MIN_STEP, NVFC_LEGACY_MIN_INTERVAL);
