@@ -662,7 +662,9 @@ def finalize_drag(state: CurveState) -> None:
 
 
 def render(stdscr: "curses._CursesWindow", state: CurveState) -> None:
-    stdscr.clear()
+    # erase(), not clear(): clear() forces a full terminal repaint on every
+    # refresh (visible flicker); erase() lets curses send only changed cells.
+    stdscr.erase()
     height, width = stdscr.getmaxyx()
     draw_top_bar(stdscr, width, state)
     next_row = 4
@@ -690,10 +692,25 @@ def curses_main(stdscr: "curses._CursesWindow", state: CurveState) -> Tuple[bool
         curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
     should_exit = False
     should_save = False
+    last_live = read_live_status()
+    dirty = True
     while not should_exit:
-        render(stdscr, state)
+        if dirty:
+            render(stdscr, state)
+            dirty = False
         key = stdscr.getch()
+        if key == -1:
+            # Idle tick: only redraw if the live marker actually changed.
+            live = read_live_status()
+            if live != last_live:
+                last_live = live
+                dirty = True
+            continue
+        if key == curses.KEY_RESIZE:
+            stdscr.clear()  # one full repaint after a resize
         should_exit, should_save = handle_key(state, key)
+        last_live = read_live_status()
+        dirty = True
     return should_save, state
 
 

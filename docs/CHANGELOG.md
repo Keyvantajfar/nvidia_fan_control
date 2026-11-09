@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+**Fixed**
+- The configurator (TUI) no longer flickers/refreshes while you look at it. It
+  repainted the whole screen every second to update the live marker; it now
+  redraws only when a key is pressed or the live temperature/fan values change,
+  and no longer forces a full-terminal repaint.
+
 ## 1.0.1
 First release under one version number (previously a mix of "V0", "v3" and "V2").
 
