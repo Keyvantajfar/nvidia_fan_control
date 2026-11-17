@@ -16,7 +16,7 @@ TESTS=(
 
 for script in "${TESTS[@]}"; do
   echo "[TEST] ${script}"
-  "${ROOT_DIR}/tests/${script}"
+  bash "${ROOT_DIR}/tests/${script}"
   echo "[PASS] ${script}"
   echo
 done
