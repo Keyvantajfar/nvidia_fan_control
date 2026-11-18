@@ -12,6 +12,8 @@ TESTS=(
   test_adaptive_sleep.sh
   test_ramp_levels.sh
   test_profiles.sh
+  test_profile_sync.sh
+  test_migrate.sh
   test_version.sh
 )
 
