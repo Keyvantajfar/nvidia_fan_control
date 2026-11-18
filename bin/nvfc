@@ -4,6 +4,8 @@
     nvfc                 open the configurator (asks for sudo itself)
     nvfc logs            follow the daemon log
     nvfc status          live temperature / fan speed and service state
+    nvfc profile         list profiles (quiet, balanced, performance, custom1, custom2)
+    nvfc profile NAME    switch profile (id, "cool", or a custom profile's name)
     nvfc apply           reload the config file without restarting
     nvfc restart         restart the service
     nvfc --version
@@ -42,6 +44,25 @@ def read_version() -> str:
     return "unknown"
 
 
+def config_module():
+    """The shared config code (installed next to the TUI, or in tui/ in a checkout)."""
+    for directory in (libexec_dir(), Path(__file__).resolve().parent.parent / "tui"):
+        if (directory / "nvfc_config.py").exists():
+            if str(directory) not in sys.path:
+                sys.path.insert(0, str(directory))
+            import nvfc_config
+            return nvfc_config
+    raise CLIError("nvfc_config.py not found; re-run installer.sh")
+
+
+def reload_service() -> bool:
+    try:
+        return run_command(["systemctl", "reload", SERVICE_NAME], check=False) == 0
+    except FileNotFoundError:
+        print("systemd not found; send SIGHUP to nvidia-fan-controld to apply.")
+        return False
+
+
 def run_command(cmd: List[str], *, check: bool = True) -> int:
     result = subprocess.run(cmd)
     if check and result.returncode != 0:
@@ -77,6 +98,38 @@ def read_status() -> Optional[Dict[str, str]]:
     return data or None
 
 
+def profile_label(pid: str) -> str:
+    try:
+        cfg = config_module()
+        settings, _ = cfg.load_settings(CONFIG_PATH)
+        return f"{settings.profile(pid).name} ({pid})" if pid in cfg.ALL_IDS else pid
+    except (CLIError, OSError):
+        return pid
+
+
+def cmd_profile(name: Optional[str]) -> None:
+    cfg = config_module()
+    settings, _ = cfg.load_settings(CONFIG_PATH)
+    if not name:
+        for prof in settings.all_profiles():
+            mark = "*" if prof.id == settings.active else " "
+            kind = "built-in" if prof.builtin else "custom"
+            print(f" {mark} {prof.id:<12} {prof.name:<{cfg.NAME_MAX}} {kind}")
+        print("\nSwitch with: nvfc profile <name>   (edit with: nvfc)")
+        return
+    pid = cfg.resolve_profile(settings, name)
+    if not pid:
+        raise CLIError(f"Unknown profile '{name}'. Run `nvfc profile` to list them.")
+    if pid == settings.active:
+        print(f"{settings.profile(pid).name} is already the active profile.")
+        return
+    cfg.set_active(CONFIG_PATH, pid)
+    reloaded = reload_service()
+    print(f"Active profile: {settings.profile(pid).name} ({pid})")
+    if not reloaded:
+        print("Note: the service was not reloaded; run `sudo nvfc apply` once it is running.")
+
+
 def cmd_status() -> None:
     print(f"Service : {service_state()}")
     st = read_status()
@@ -88,6 +141,8 @@ def cmd_status() -> None:
     except ValueError:
         age = 0
     fan = st.get("fan", "?")
+    if st.get("profile"):
+        print(f"Profile : {profile_label(st['profile'])}")
     print(f"GPU temp: {st.get('temp', '?')} °C")
     print(f"Fan     : {'auto/unset' if fan == '-1' else fan + ' %'} (target {st.get('target', '?')} %)")
     print(f"Smooth  : {'on' if st.get('smooth') == '1' else 'off'}")
@@ -111,15 +166,16 @@ def cmd_configure() -> int:
     if ret != 0:
         print("No changes applied.")
         return ret
-    run_command(["systemctl", "reload", SERVICE_NAME], check=False)
+    reload_service()
     print("Config saved and reloaded.")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="nvfc", description="NVIDIA Fan Control manager")
-    p.add_argument("command", nargs="?", choices=["configure", "logs", "status", "apply", "restart"],
+    p.add_argument("command", nargs="?", choices=["configure", "logs", "status", "profile", "apply", "restart"],
                    help="default: configure")
+    p.add_argument("name", nargs="?", help="profile to switch to (with `profile`)")
     p.add_argument("--version", action="store_true")
     # Legacy flags from the V2 wrapper.
     p.add_argument("--re-configure", dest="legacy_configure", action="store_true", help=argparse.SUPPRESS)
@@ -151,6 +207,10 @@ def main(argv: List[str]) -> int:
             cmd_status()
         elif command == "logs":
             cmd_logs()
+        elif command == "profile":
+            if args.name:
+                ensure_root(argv)
+            cmd_profile(args.name)
         elif command == "restart":
             ensure_root(argv)
             run_command(["systemctl", "restart", SERVICE_NAME])
