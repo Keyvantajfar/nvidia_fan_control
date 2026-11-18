@@ -15,6 +15,7 @@ TESTS=(
   test_profile_sync.sh
   test_migrate.sh
   test_tui_profiles.sh
+  test_update.sh
   test_version.sh
 )
 

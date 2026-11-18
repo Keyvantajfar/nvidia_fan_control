@@ -6,6 +6,7 @@
     nvfc status          live temperature / fan speed and service state
     nvfc profile         list profiles (quiet, balanced, performance, custom1, custom2)
     nvfc profile NAME    switch profile (id, "cool", or a custom profile's name)
+    nvfc update          update to the latest release (keeps your config)
     nvfc apply           reload the config file without restarting
     nvfc restart         restart the service
     nvfc --version
@@ -13,10 +14,18 @@
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,6 +33,14 @@ CONFIG_PATH = os.environ.get("NVFC_CONFIG_PATH") or "/etc/nvidia-fan-control.con
 LIBEXEC_DIR_DEFAULT = "/usr/local/lib/nvidia-fan-control"
 SERVICE_NAME = "nvidia-fan-control"
 STATUS_PATH = os.environ.get("NVFC_STATUS_PATH") or "/run/nvidia-fan-control/status"
+
+# Where `nvfc update` looks. The env overrides exist for forks and for tests.
+UPDATE_REPO = os.environ.get("NVFC_UPDATE_REPO") or "Keyvantajfar/nvidia_fan_control"
+TAGS_URL = os.environ.get("NVFC_UPDATE_TAGS_URL") or f"https://api.github.com/repos/{UPDATE_REPO}/tags?per_page=100"
+RAW_VERSION_URL = (os.environ.get("NVFC_UPDATE_RAW_URL")
+                   or f"https://raw.githubusercontent.com/{UPDATE_REPO}/{{branch}}/VERSION")
+ARCHIVE_URL = os.environ.get("NVFC_UPDATE_ARCHIVE_URL") or f"https://github.com/{UPDATE_REPO}/archive/{{ref}}.tar.gz"
+NIGHTLY_BRANCH = "nightly"
 
 
 class CLIError(Exception):
@@ -130,6 +147,112 @@ def cmd_profile(name: Optional[str]) -> None:
         print("Note: the service was not reloaded; run `sudo nvfc apply` once it is running.")
 
 
+# --- update ---------------------------------------------------------------------
+
+def parse_version(text: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", text)[:3])
+
+
+def http_get(url: str, limit: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": f"nvfc/{read_version()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read(limit + 1)
+    except (urllib.error.URLError, OSError) as exc:
+        raise CLIError(f"Could not download {url}: {exc}\n"
+                       "Offline? Update from a folder or archive instead: nvfc update --from <dir|.tar.gz>")
+    if len(data) > limit:
+        raise CLIError(f"Download from {url} is unexpectedly large; refusing.")
+    return data
+
+
+def latest_release() -> tuple:
+    """(tag, version) of the highest vX.Y.Z tag in the repository."""
+    try:
+        tags = [t["name"] for t in json.loads(http_get(TAGS_URL, 1 << 20))]
+    except (ValueError, KeyError, TypeError):
+        raise CLIError("Unexpected answer from the release list.")
+    best = [(parse_version(t), t) for t in tags if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
+    if not best:
+        raise CLIError("No release tags (vX.Y.Z) found; try: nvfc update --channel nightly")
+    version, tag = max(best)
+    return tag, ".".join(map(str, version))
+
+
+def extract_archive(data: bytes, dest: str) -> str:
+    """Unpack a .tar.gz (regular files and folders only, no path escapes) and return
+    the folder that holds installer.sh."""
+    root = os.path.realpath(dest)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        members = []
+        for m in tar.getmembers():
+            target = os.path.realpath(os.path.join(root, m.name))
+            if target != root and not target.startswith(root + os.sep):
+                raise CLIError(f"Unsafe path in archive: {m.name}")
+            if m.isreg() or m.isdir():
+                members.append(m)
+        kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tar.extractall(root, members=members, **kwargs)
+    for dirpath, _dirs, files in os.walk(root):
+        if "installer.sh" in files and "VERSION" in files:
+            return dirpath
+    raise CLIError("The archive does not look like NVIDIA Fan Control (no installer.sh).")
+
+
+def cmd_update(args: argparse.Namespace, argv: List[str]) -> int:
+    if not args.check:
+        ensure_root(argv)  # first, so a sudo prompt does not interrupt the output below
+    installed = read_version()
+    tmp: Optional[str] = None
+    try:
+        if args.from_path:
+            src = Path(args.from_path).expanduser()
+            if src.is_dir():
+                source_dir, origin = str(src), str(src)
+            elif src.is_file():
+                tmp = tempfile.mkdtemp(prefix="nvfc-update-")
+                source_dir, origin = extract_archive(src.read_bytes(), tmp), str(src)
+            else:
+                raise CLIError(f"{src}: no such folder or archive")
+            new_version = (Path(source_dir) / "VERSION").read_text().strip()
+            ref = None
+        elif args.channel == "nightly":
+            ref = f"refs/heads/{NIGHTLY_BRANCH}"
+            new_version = http_get(RAW_VERSION_URL.format(branch=NIGHTLY_BRANCH), 64).decode().strip()
+            origin = f"{UPDATE_REPO} ({NIGHTLY_BRANCH})"
+        else:
+            tag, new_version = latest_release()
+            ref, origin = f"refs/tags/{tag}", f"{UPDATE_REPO} ({tag})"
+
+        print(f"Installed: {installed}")
+        print(f"Available: {new_version}  [{origin}]")
+        newer = parse_version(new_version) > parse_version(installed)
+        # A nightly or a local folder can carry changes under the same version number;
+        # the installer only touches what actually differs, so re-running it is cheap.
+        worthwhile = newer or args.force or args.channel == "nightly" or bool(args.from_path)
+        if not worthwhile:
+            print("Already up to date.")
+            return 0
+        if args.check:
+            print("Update available: run `nvfc update`." if newer else "Run `nvfc update` to apply.")
+            return 0
+
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise CLIError("Not a terminal: add --yes to update without asking.")
+            if input("Update now? Your config is kept. [y/N] ").strip().lower() not in ("y", "yes"):
+                print("Cancelled.")
+                return 1
+        if ref:
+            tmp = tmp or tempfile.mkdtemp(prefix="nvfc-update-")
+            print("Downloading...")
+            source_dir = extract_archive(http_get(ARCHIVE_URL.format(ref=ref), 64 << 20), tmp)
+        return subprocess.run(["sh", str(Path(source_dir) / "installer.sh")]).returncode
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def cmd_status() -> None:
     print(f"Service : {service_state()}")
     st = read_status()
@@ -173,10 +296,18 @@ def cmd_configure() -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="nvfc", description="NVIDIA Fan Control manager")
-    p.add_argument("command", nargs="?", choices=["configure", "logs", "status", "profile", "apply", "restart"],
+    p.add_argument("command", nargs="?", choices=["configure", "logs", "status", "profile", "update", "apply", "restart"],
                    help="default: configure")
     p.add_argument("name", nargs="?", help="profile to switch to (with `profile`)")
     p.add_argument("--version", action="store_true")
+    up = p.add_argument_group("update options")
+    up.add_argument("--check", action="store_true", help="only report whether an update is available")
+    up.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+    up.add_argument("--force", action="store_true", help="reinstall even if already up to date")
+    up.add_argument("--channel", choices=["release", "nightly"], default="release",
+                    help="release = latest vX.Y.Z tag (default), nightly = newest development build")
+    up.add_argument("--from", dest="from_path", metavar="PATH",
+                    help="update from a source folder (e.g. a git checkout) or .tar.gz instead of downloading")
     # Legacy flags from the V2 wrapper.
     p.add_argument("--re-configure", dest="legacy_configure", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--status", dest="legacy_status", action="store_true", help=argparse.SUPPRESS)
@@ -211,6 +342,8 @@ def main(argv: List[str]) -> int:
             if args.name:
                 ensure_root(argv)
             cmd_profile(args.name)
+        elif command == "update":
+            return cmd_update(args, argv)
         elif command == "restart":
             ensure_root(argv)
             run_command(["systemctl", "restart", SERVICE_NAME])

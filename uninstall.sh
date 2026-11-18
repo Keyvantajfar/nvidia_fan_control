@@ -1,7 +1,7 @@
 #!/bin/sh
 # Uninstaller for NVIDIA Fan Control.
 #   ./uninstall.sh          remove everything but keep /etc/nvidia-fan-control.conf
-#   ./uninstall.sh --purge  also delete the config
+#   ./uninstall.sh --purge  also delete the config (and its .vN.bak backups)
 # Pre-1.0 ("V2") files are removed too.
 
 set -eu
@@ -36,7 +36,7 @@ fi
 rm -f $FILES
 rm -rf "$LIBEXEC_DIR"
 if [ "$PURGE" -eq 1 ]; then
-    rm -f "$CONFIG_PATH" /etc/nvidia-fan-controlV2.conf
+    rm -f "$CONFIG_PATH" "$CONFIG_PATH".v*.bak /etc/nvidia-fan-controlV2.conf
 fi
 
 if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
