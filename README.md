@@ -1,4 +1,4 @@
-# NVIDIA Fan Control 1.0
+# NVIDIA Fan Control
 
 A small, quiet fan-curve daemon for NVIDIA GPUs on Linux (NVML, systemd), with a
 terminal configurator. Written to be gentle: it wakes up rarely when the GPU is
@@ -16,11 +16,29 @@ idle, and it writes to the fan controller only when a change actually matters.
 
 That is all. It checks for `gcc`, `make` and `python3`, builds, installs,
 enables and starts the service, and writes a default config if you have none.
-Re-running upgrades in place and keeps your config; an old "V2" install is
-migrated automatically. No NVIDIA dev headers are needed (NVML is loaded from the
-driver at runtime). Options: `--no-start`, `--configure`.
+No NVIDIA dev headers are needed (NVML is loaded from the driver at runtime).
+Options: `--no-start`, `--configure`. An old "V2" install is migrated automatically.
 
 Remove with `./uninstall.sh` (keeps your config) or `./uninstall.sh --purge`.
+
+## Update
+
+```sh
+nvfc update              # newest release: shows the versions, asks, installs
+nvfc update --check      # only tell me if there is one
+```
+
+Nothing to uninstall and your config is kept. Only the parts that changed are
+replaced, and the service is restarted only if the daemon itself changed (a
+configurator-only release leaves the running fan control alone). Also available:
+`--yes` (no prompt), `--force`, `--channel nightly` (development build), and
+`--from <folder|.tar.gz>` to update from a git checkout or archive without network
+(`git pull && nvfc update --from .` or simply `git pull && ./installer.sh`).
+
+A config written by an older release is upgraded automatically: your old curve and
+Smart Smooth settings become the **custom1** profile ("Previous config") and stay
+active, so nothing changes in how the fan behaves. The old file is kept as
+`/etc/nvidia-fan-control.conf.v1.bak`.
 
 ## Use
 
@@ -29,7 +47,9 @@ Run from anywhere:
 | Command | What it does |
 |---|---|
 | `nvfc` | Open the configurator (asks for sudo itself), save, and reload the daemon. |
-| `nvfc status` | Live GPU temperature, fan speed, target, polling interval. |
+| `nvfc status` | Live GPU temperature, fan speed, target, polling interval, active profile. |
+| `nvfc profile` | List profiles; `nvfc profile quiet` (or `cool`, or a custom profile's name) switches. |
+| `nvfc update` | Update to the newest release (see above). |
 | `nvfc logs` | Follow the daemon log. |
 | `nvfc apply` | Reload an edited config file without opening the TUI. |
 | `nvfc restart` | Restart the service. |
@@ -41,9 +61,25 @@ Run from anywhere:
 ### The configurator
 `↑/↓` pick a point, `←/→` change its temperature or speed, `TAB` switches
 between temp / speed / runtime settings, `SPACE` grabs a point to reorder,
-`A`/`R` add or remove points (3–7), `T` presets, `S` save, `Q` quit. In the
-runtime pane, `←/→` or `SPACE` toggles **Smart Smooth**. While the daemon runs,
-the plot shows a live `@` marker at the current temperature and fan speed.
+`A`/`R` add or remove points (3–7), `P` profile, `C` copy, `N` rename, `S` save,
+`Q` quit. In the runtime pane, `←/→` or `SPACE` toggles **Smart Smooth**. While
+the daemon runs, the plot shows a live `@` marker at the current temperature and
+fan speed.
+
+## Profiles
+
+| Profile | Curve | Ramp-down |
+|---|---|---|
+| **Quiet** | low fan speeds, rises late | `quick` |
+| **Balanced** (default) | the original default curve | `balanced` |
+| **Performance** | higher speeds sooner, 100 % at 85 °C | `slow` (holds speed longest) |
+| **custom1**, **custom2** | yours; name them anything | yours |
+
+A profile is a curve plus its Smart Smooth settings. GPU and polling settings are
+shared by all profiles. The three built-in profiles are fixed and read-only; to
+start from one, open it in the configurator, press `C` and pick a custom slot,
+then edit and rename (`N`). The profile you are viewing when you press `S` is the
+one that runs. Without the configurator: `nvfc profile performance`.
 
 ## Smart Smooth
 
@@ -83,28 +119,40 @@ idle, lower `sleep_max`.
 read at start-up and on reload (`nvfc apply` / `SIGHUP`):
 
 ```ini
-[curve]
-temps = 0,40,55,67,75,85       # strictly increasing, 3-7 points, 0-120 °C
-speeds = 25,30,45,65,78,99     # 0-100 %
+[nvfc]
+config_version = 2
 
-[run]
+[profile]
+active = custom1               # quiet, balanced, performance, custom1 or custom2
+
+[run]                          # shared by all profiles
 gpu_index = 0
 sleep_low = 5                  # poll interval when cool (seconds)
 sleep_high = 2                 # poll interval at/above high_temp_threshold
 sleep_max = 10                 # longest interval when cool and stable
 high_temp_threshold = 42
 
-[smooth]
-enabled = on
-deadband = 3                   # ignore speed changes below this (%)
-down_hold = 15                 # seconds a lower target must persist
-down_step = 5                  # max % dropped per ramp-down write
-emergency_temp = 85            # smoothing bypassed at/above this
+[custom1]                      # custom2 looks the same
+name = Gaming
+temps = 0,40,55,67,75,85       # strictly increasing, 3-7 points, 0-120 °C
+speeds = 25,30,45,65,78,99     # 0-100 %
+enabled = on                   # Smart Smooth
+ramp_down = balanced           # quick, balanced or slow
+deadband = 3                   # optional: ignore speed changes below this (%)
+down_hold = 15                 # optional: seconds a lower target must persist
+down_step = 5                  # optional: max % dropped per ramp-down write
+emergency_temp = 85            # optional: smoothing bypassed at/above this
 ```
 
-Invalid values are clamped with a warning. An invalid curve falls back to the
-built-in default curve and keeps your `[run]`/`[smooth]` options. When the service
-stops, the fan is handed back to the driver's automatic control.
+(Put `#` comments on their own line in a real file; they are not stripped after a
+value.) Invalid values are clamped with a warning. An invalid curve falls back to
+the balanced curve and keeps your other options; an unknown profile falls back to
+`balanced`. When the service stops, the fan is handed back to the driver's
+automatic control.
+
+Config files from before profiles (a plain `[curve]` + `[smooth]`, no `[profile]`)
+still load exactly as they did, as custom1, and are upgraded on the next update or
+save.
 
 ## Development
 
@@ -117,7 +165,11 @@ make test                    # run the test suite (mock GPU, no hardware)
 `mock_nvml/` is a fake NVML library driven by files in `$NVML_MOCK_DIR`
 (`mock_nvml/mockctl.sh set-temp 70`). Fan writes are logged to
 `$NVML_MOCK_DIR/fan_speed.log`. Layout: `src/` daemon, `bin/nvfc` CLI,
-`tui/` configurator, `systemd/` unit, `tests/`, `docs/CHANGELOG.md`.
+`tui/` configurator + shared config/migration code (`nvfc_config.py`), `systemd/`
+unit, `tests/`, `docs/CHANGELOG.md`. The built-in profiles live in both
+`src/config.c` and `tui/nvfc_config.py`; `tests/test_profile_sync.sh` keeps them
+equal. To change the config format: bump `CONFIG_VERSION`, add one function to
+`MIGRATIONS` in `nvfc_config.py`, and teach `src/config.c`.
 
 ### Manual test demo
 
