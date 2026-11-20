@@ -11,12 +11,17 @@ TESTS=(
   test_smart_smooth.sh
   test_adaptive_sleep.sh
   test_ramp_levels.sh
+  test_profiles.sh
+  test_profile_sync.sh
+  test_migrate.sh
+  test_tui_profiles.sh
+  test_update.sh
   test_version.sh
 )
 
 for script in "${TESTS[@]}"; do
   echo "[TEST] ${script}"
-  "${ROOT_DIR}/tests/${script}"
+  bash "${ROOT_DIR}/tests/${script}"
   echo "[PASS] ${script}"
   echo
 done

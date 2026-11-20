@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Curses-based configurator for NVIDIA Fan Control.
 
-Interactive terminal UI for editing the fan curve, Smart Smooth and polling
-options stored in the daemon's INI config file (applied with a reload, no
+Interactive terminal UI for editing fan profiles (curve + Smart Smooth) and the
+polling options stored in the daemon's INI config file (applied with a reload, no
 rebuild).  Dependency-free (stdlib only); works on a console or over SSH.
 
 Key bindings (also shown in the UI):
@@ -11,9 +11,15 @@ Key bindings (also shown in the UI):
     TAB   Cycle focus between temperature, speed, and runtime parameter panes
     SPACE Pick up / drop the current point for reordering
     A/R   Add or remove a point (between 3 and 7 points)
-    T     Choose a preset template (Quiet / Default / Aggressive / Custom)
+    P     Pick the profile to view/edit (it becomes the active one when you save)
+    C     Copy the viewed profile into a custom slot (custom1 / custom2)
+    N     Rename a custom profile
     S     Save
     Q     Quit without saving
+
+Quiet, Balanced and Performance are built in and read-only; custom1 and custom2
+are yours to edit and name.  The runtime settings (GPU, polling) are shared by
+all profiles.
 
 In the runtime settings pane, ←/→ (or SPACE) toggles Smart Smooth and picks the
 ramp-down level (quick / balanced / slow).  While the
@@ -25,7 +31,6 @@ file.
 from __future__ import annotations
 
 import argparse
-import configparser
 import curses
 import os
 import shutil
@@ -33,7 +38,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Optional, Tuple
+
+from nvfc_config import (
+    ALL_IDS, BUILTIN_IDS, CONFIG_VERSION, CUSTOM_IDS, MAX_POINTS, MIN_POINTS, NAME_MAX,
+    RAMP_LEVELS, SPEED_MAX, SPEED_MIN, TEMP_MAX, TEMP_MIN, Profile, Settings, clean_name,
+    load_settings, save_settings, validate_curve,
+)
 
 ACTIVE_SCREEN = None
 
@@ -51,25 +62,6 @@ def safe_addstr(win, y, x, text, attr=None):
 CONFIG_PATH = "/etc/nvidia-fan-control.conf"
 STATUS_PATH = os.environ.get("NVFC_STATUS_PATH") or "/run/nvidia-fan-control/status"
 STATUS_MAX_AGE = 90  # daemon rewrites at least every 60 s
-MIN_POINTS = 3
-MAX_POINTS = 7
-TEMP_MIN = 0
-TEMP_MAX = 120
-SPEED_MIN = 0
-SPEED_MAX = 100
-
-DEFAULT_RUN_SETTINGS = {
-    "gpu_index": 0,
-    "sleep_low": 5,
-    "sleep_high": 2,
-    "sleep_max": 10,
-    "high_temp_threshold": 42,
-}
-
-# Advanced Smart Smooth keys: not shown in the UI. Only keys already present in
-# the file are kept (and written back); anything absent stays at the level default.
-SMOOTH_EXTRA_KEYS = ("deadband", "down_hold", "down_step", "down_interval", "emergency_temp")
-RAMP_LEVELS = ["quick", "balanced", "slow"]
 
 
 def read_version() -> str:
@@ -105,26 +97,24 @@ def interpolate(temps: List[int], speeds: List[int], t: float) -> float:
             return speeds[i] + (speeds[i + 1] - speeds[i]) * frac
     return speeds[-1]
 
-TEMPLATES: Dict[str, Tuple[List[int], List[int]]] = {
-    "Quiet": ([0, 45, 60, 72, 82, 92, 100], [15, 20, 30, 45, 60, 75, 90]),
-    "Default": ([0, 40, 55, 67, 75, 85], [25, 30, 45, 65, 78, 99]),
-    "Aggressive": ([0, 35, 45, 55, 65, 75, 85], [30, 40, 55, 70, 85, 95, 100]),
-    "Custom": (None, None),  # Filled with current values when selected
-}
-
 
 @dataclass
 class CurveState:
+    """What the screen shows: the viewed profile's curve + smooth settings, plus the
+    runtime settings shared by every profile.  `settings` keeps the stored profiles."""
     temps: List[int]
     speeds: List[int]
-    gpu_index: int = DEFAULT_RUN_SETTINGS["gpu_index"]
-    sleep_low: int = DEFAULT_RUN_SETTINGS["sleep_low"]
-    sleep_high: int = DEFAULT_RUN_SETTINGS["sleep_high"]
-    sleep_max: int = DEFAULT_RUN_SETTINGS["sleep_max"]
-    high_temp_threshold: int = DEFAULT_RUN_SETTINGS["high_temp_threshold"]
+    settings: Settings = field(default_factory=Settings)
+    schema: int = CONFIG_VERSION
+    profile_id: str = "balanced"
+    gpu_index: int = 0
+    sleep_low: int = 5
+    sleep_high: int = 2
+    sleep_max: int = 10
+    high_temp_threshold: int = 42
     smooth_enabled: bool = True
     ramp_down: str = "balanced"
-    smooth_extra: Dict[str, str] = field(default_factory=dict)
+    smooth_extra: dict = field(default_factory=dict)
     selected_index: int = 0
     focus_axis: int = 0  # 0 -> temperature, 1 -> speed
     focus_area: str = "points"  # "points" or "fields"
@@ -132,119 +122,59 @@ class CurveState:
     dragging: bool = False
     drag_origin: int = 0
     drag_target: int = 0
-    preset_name: str = "Custom"
-    modified_since_preset: bool = False
     status_message: str = ""
     error_message: str = ""
-
-    def clone(self) -> "CurveState":
-        return CurveState(
-            temps=list(self.temps),
-            speeds=list(self.speeds),
-            gpu_index=self.gpu_index,
-            sleep_low=self.sleep_low,
-            sleep_high=self.sleep_high,
-            sleep_max=self.sleep_max,
-            high_temp_threshold=self.high_temp_threshold,
-            smooth_enabled=self.smooth_enabled,
-            ramp_down=self.ramp_down,
-            smooth_extra=dict(self.smooth_extra),
-            selected_index=self.selected_index,
-            focus_axis=self.focus_axis,
-            focus_area=self.focus_area,
-            field_index=self.field_index,
-            dragging=self.dragging,
-            drag_origin=self.drag_origin,
-            drag_target=self.drag_target,
-            preset_name=self.preset_name,
-            modified_since_preset=self.modified_since_preset,
-            status_message=self.status_message,
-            error_message=self.error_message,
-        )
 
     @property
     def num_points(self) -> int:
         return len(self.temps)
 
-    def mark_modified(self) -> None:
-        if self.preset_name != "Custom":
-            self.modified_since_preset = True
+    @property
+    def read_only(self) -> bool:
+        return self.profile_id in BUILTIN_IDS
 
-    def ensure_custom_preset(self) -> None:
-        if self.preset_name != "Custom" and self.modified_since_preset:
-            self.preset_name = "Custom"
+    @property
+    def profile(self) -> Profile:
+        return self.settings.profile(self.profile_id)
+
+    def commit(self) -> None:
+        """Write the on-screen values back into the stored custom profile."""
+        if self.read_only:
+            return
+        p = self.settings.custom[self.profile_id]
+        p.temps, p.speeds = list(self.temps), list(self.speeds)
+        p.smooth_enabled, p.ramp_down = self.smooth_enabled, self.ramp_down
+        p.smooth_extra = dict(self.smooth_extra)
+
+    def view(self, pid: str) -> None:
+        """Show profile `pid` (the current one must already be committed)."""
+        p = self.settings.profile(pid)
+        self.profile_id = pid
+        self.temps, self.speeds = list(p.temps), list(p.speeds)
+        self.smooth_enabled, self.ramp_down = p.smooth_enabled, p.ramp_down
+        self.smooth_extra = dict(p.smooth_extra)
+        self.selected_index = min(self.selected_index, self.num_points - 1)
+        self.dragging = False
 
 
 def load_config(path: str) -> CurveState:
-    if not os.path.exists(path):
-        temps, speeds = TEMPLATES["Default"]
-        return CurveState(list(temps), list(speeds))
-
-    parser = configparser.ConfigParser()
-    parser.read(path)
-
-    temps_raw = parser.get("curve", "temps", fallback="")
-    speeds_raw = parser.get("curve", "speeds", fallback="")
-
-    temps = [int(x.strip()) for x in temps_raw.split(",") if x.strip()]
-    speeds = [int(x.strip()) for x in speeds_raw.split(",") if x.strip()]
-
-    state = CurveState(temps, speeds)
-    state.gpu_index = parser.getint("run", "gpu_index", fallback=DEFAULT_RUN_SETTINGS["gpu_index"])
-    state.sleep_low = parser.getint("run", "sleep_low", fallback=DEFAULT_RUN_SETTINGS["sleep_low"])
-    state.sleep_high = parser.getint("run", "sleep_high", fallback=DEFAULT_RUN_SETTINGS["sleep_high"])
-    state.sleep_max = parser.getint("run", "sleep_max", fallback=DEFAULT_RUN_SETTINGS["sleep_max"])
-    state.high_temp_threshold = parser.getint(
-        "run", "high_temp_threshold", fallback=DEFAULT_RUN_SETTINGS["high_temp_threshold"]
-    )
-    state.smooth_enabled = parser.getboolean("smooth", "enabled", fallback=True)
-    ramp = parser.get("smooth", "ramp_down", fallback="balanced").strip().lower()
-    state.ramp_down = ramp if ramp in RAMP_LEVELS else "balanced"
-    for key in SMOOTH_EXTRA_KEYS:
-        if parser.has_option("smooth", key):
-            state.smooth_extra[key] = parser.get("smooth", key)
-    # Configs saved by 1.0.0 contain these two as plain defaults; they would
-    # override the ramp_down level, so treat that exact pair as "not customised".
-    has_ramp_key = parser.has_option("smooth", "ramp_down")
-    if (not has_ramp_key and state.smooth_extra.get("down_hold") == "15"
-            and state.smooth_extra.get("down_step") == "5"):
-        del state.smooth_extra["down_hold"]
-        del state.smooth_extra["down_step"]
-    # Try to detect matching template
-    for name, (temps_template, speeds_template) in TEMPLATES.items():
-        if temps_template is None:
-            continue
-        if temps == list(temps_template) and speeds == list(speeds_template):
-            state.preset_name = name
-            break
-    else:
-        state.preset_name = "Custom"
+    settings, schema = load_settings(path)
+    state = CurveState([], [], settings=settings, schema=schema)
+    for key, value in settings.run.items():
+        setattr(state, key, value)
+    state.view(settings.active)
+    if schema < CONFIG_VERSION:
+        state.status_message = "Config from an older version: your settings are in the custom1 profile."
     return state
 
 
 def save_config(path: str, state: CurveState) -> None:
-    dirpath = os.path.dirname(path)
-    if dirpath:
-        os.makedirs(dirpath, exist_ok=True)
-    parser = configparser.ConfigParser()
-    parser["curve"] = {
-        "temps": ",".join(str(x) for x in state.temps),
-        "speeds": ",".join(str(x) for x in state.speeds),
-    }
-    parser["run"] = {
-        "gpu_index": str(state.gpu_index),
-        "sleep_low": str(state.sleep_low),
-        "sleep_high": str(state.sleep_high),
-        "sleep_max": str(state.sleep_max),
-        "high_temp_threshold": str(state.high_temp_threshold),
-    }
-    parser["smooth"] = {
-        "enabled": "on" if state.smooth_enabled else "off",
-        "ramp_down": state.ramp_down,
-        **state.smooth_extra,
-    }
-    with open(path, "w", encoding="utf-8") as fp:
-        parser.write(fp)
+    state.commit()
+    settings = state.settings
+    settings.active = state.profile_id
+    for key in settings.run:
+        settings.run[key] = getattr(state, key)
+    save_settings(path, settings, state.schema)
 
 
 def clamp(value: int, minimum: int, maximum: int) -> int:
@@ -252,20 +182,9 @@ def clamp(value: int, minimum: int, maximum: int) -> int:
 
 
 def validate_state(state: CurveState) -> Tuple[bool, str]:
-    if not (MIN_POINTS <= state.num_points <= MAX_POINTS):
-        return False, f"Curve must contain between {MIN_POINTS} and {MAX_POINTS} points."
-    if len(state.temps) != len(state.speeds):
-        return False, "Temperature and speed point counts must match."
-    last_temp = -1
-    for idx, temp in enumerate(state.temps):
-        if not (TEMP_MIN <= temp <= TEMP_MAX):
-            return False, f"Temperature at index {idx} must be within {TEMP_MIN}-{TEMP_MAX}."
-        if temp <= last_temp:
-            return False, "Temperatures must be strictly increasing."
-        last_temp = temp
-    for idx, speed in enumerate(state.speeds):
-        if not (SPEED_MIN <= speed <= SPEED_MAX):
-            return False, f"Speed at index {idx} must be within {SPEED_MIN}-{SPEED_MAX}."
+    ok, err = validate_curve(state.temps, state.speeds)
+    if not ok:
+        return False, err
     if state.sleep_low < 1 or state.sleep_high < 1 or state.sleep_max < 1:
         return False, "Sleep intervals must be positive integers."
     if state.sleep_max < state.sleep_low:
@@ -277,15 +196,31 @@ def validate_state(state: CurveState) -> Tuple[bool, str]:
     return True, ""
 
 
+def draw_profile_bar(stdscr: "curses._CursesWindow", row: int, width: int, state: CurveState) -> None:
+    """One line listing all profiles; the viewed one is highlighted, '*' marks read-only."""
+    safe_addstr(stdscr, row, 0, " " * (width - 1))
+    col = 0
+    safe_addstr(stdscr, row, col, "Profile: ")
+    col += 9
+    for pid in ALL_IDS:
+        prof = state.settings.profile(pid) if pid != state.profile_id else state.profile
+        label = f" {prof.name[:14]}{'*' if prof.builtin else ''} "
+        attr = curses.A_REVERSE if pid == state.profile_id else curses.A_NORMAL
+        safe_addstr(stdscr, row, col, label, attr)
+        col += len(label) + 1
+    note = "read-only (C = copy to custom)" if state.read_only else "custom"
+    safe_addstr(stdscr, row, col + 1, note)
+
+
 def draw_top_bar(stdscr: "curses._CursesWindow", width: int, state: CurveState) -> None:
     version = read_version()
     title = f" NVIDIA Fan Control {version} Configurator ".replace("  ", " ")
-    hints = "↑/↓ move  ←/→ adjust  SPACE grab  TAB switch focus  A add  R remove  T presets  S save  Q quit"
+    hints = "↑↓ move  ←→ adjust  SPACE grab  TAB focus  A/R add/remove  P profile  C copy  N rename  S save  Q quit"
     stdscr.attron(curses.A_REVERSE)
     safe_addstr(stdscr, 0, 0, title.ljust(width))
     stdscr.attroff(curses.A_REVERSE)
     safe_addstr(stdscr, 1, 0, hints.ljust(width))
-    safe_addstr(stdscr, 2, 0, f"Preset: {state.preset_name} {'(modified)' if state.modified_since_preset else ''}".ljust(width))
+    draw_profile_bar(stdscr, 2, width, state)
 
 
 def draw_points_table(stdscr: "curses._CursesWindow", start_row: int, width: int, state: CurveState) -> int:
@@ -383,37 +318,54 @@ def draw_messages(stdscr: "curses._CursesWindow", height: int, width: int, state
         safe_addstr(stdscr, height - 1, 0, " " * (width - 1))
 
 
-def select_template(stdscr: "curses._CursesWindow", state: CurveState) -> Tuple[List[int], List[int], str]:
-    options = list(TEMPLATES.keys())
-    current = options.index(state.preset_name) if state.preset_name in options else 0
-
+def pick_from_list(stdscr: "curses._CursesWindow", title: str, rows: List[str], current: int,
+                   footer: str = " Enter=Select  Esc=Cancel ") -> Optional[int]:
+    """Small modal list. Returns the chosen index or None when cancelled."""
     height, width = stdscr.getmaxyx()
-    box_width = max(len(opt) for opt in options) + 8
-    box_height = len(options) + 4
+    box_width = min(max(max(len(r) for r in rows) + 6, len(footer) + 2, len(title) + 4), max(width - 2, 10))
+    box_height = len(rows) + 3
     start_row = max(3, (height - box_height) // 2)
     start_col = max(2, (width - box_width) // 2)
 
     while True:
         stdscr.attron(curses.A_REVERSE)
-        safe_addstr(stdscr, start_row, start_col, " Presets ".ljust(box_width))
+        safe_addstr(stdscr, start_row, start_col, f" {title} ".ljust(box_width))
         stdscr.attroff(curses.A_REVERSE)
-        for idx, opt in enumerate(options):
+        for idx, row in enumerate(rows):
             attr = curses.A_REVERSE if idx == current else curses.A_NORMAL
-            safe_addstr(stdscr, start_row + 1 + idx, start_col, f"  {opt}".ljust(box_width), attr)
-        safe_addstr(stdscr, start_row + box_height - 1, start_col, " Enter=Select  Esc=Cancel ".ljust(box_width))
+            safe_addstr(stdscr, start_row + 1 + idx, start_col, f"  {row}".ljust(box_width)[:box_width], attr)
+        safe_addstr(stdscr, start_row + box_height - 1, start_col, footer.ljust(box_width)[:box_width])
         key = stdscr.getch()
         if key in (curses.KEY_UP, ord("k")):
-            current = (current - 1) % len(options)
+            current = (current - 1) % len(rows)
         elif key in (curses.KEY_DOWN, ord("j")):
-            current = (current + 1) % len(options)
+            current = (current + 1) % len(rows)
         elif key in (curses.KEY_ENTER, 10, 13):
-            name = options[current]
-            temps, speeds = TEMPLATES[name]
-            if temps is None:
-                return state.temps, state.speeds, "Custom"
-            return list(temps), list(speeds), name
+            return current
         elif key in (27, ord("q")):
-            return state.temps, state.speeds, state.preset_name
+            return None
+
+
+def prompt_text(stdscr: "curses._CursesWindow", label: str, initial: str) -> Optional[str]:
+    """One-line text entry on the bottom line. Enter accepts, Esc cancels."""
+    height, width = stdscr.getmaxyx()
+    text = initial
+    while True:
+        line = f"{label}: {text}_"
+        safe_addstr(stdscr, height - 2, 0, line[: width - 1].ljust(width - 1), curses.A_REVERSE)
+        stdscr.refresh()
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            continue  # idle tick
+        if key in ("\n", "\r") or key == curses.KEY_ENTER:
+            return text
+        if key == "\x1b":
+            return None
+        if key in ("\x7f", "\b") or key == curses.KEY_BACKSPACE:
+            text = text[:-1]
+        elif isinstance(key, str) and key.isprintable() and len(text) < NAME_MAX:
+            text += key
 
 
 def adjust_temperature(state: CurveState, delta: int) -> None:
@@ -426,8 +378,6 @@ def adjust_temperature(state: CurveState, delta: int) -> None:
     new_temp = clamp(new_temp, lower_bound, upper_bound)
     if new_temp != state.temps[idx]:
         state.temps[idx] = new_temp
-        state.mark_modified()
-        state.ensure_custom_preset()
 
 
 def adjust_speed(state: CurveState, delta: int) -> None:
@@ -435,8 +385,6 @@ def adjust_speed(state: CurveState, delta: int) -> None:
     new_speed = clamp(state.speeds[idx] + delta, SPEED_MIN, SPEED_MAX)
     if new_speed != state.speeds[idx]:
         state.speeds[idx] = new_speed
-        state.mark_modified()
-        state.ensure_custom_preset()
 
 
 def add_point(state: CurveState) -> None:
@@ -465,8 +413,6 @@ def add_point(state: CurveState) -> None:
     state.temps.insert(insert_at, new_temp)
     state.speeds.insert(insert_at, new_speed)
     state.selected_index = insert_at
-    state.mark_modified()
-    state.ensure_custom_preset()
     state.error_message = ""
 
 
@@ -478,8 +424,6 @@ def remove_point(state: CurveState) -> None:
     del state.speeds[state.selected_index]
     if state.selected_index >= state.num_points:
         state.selected_index = state.num_points - 1
-    state.mark_modified()
-    state.ensure_custom_preset()
     state.error_message = ""
 
 
@@ -514,8 +458,12 @@ def handle_key(state: CurveState, key: int) -> Tuple[bool, bool]:
             return True, True
         state.error_message = err
         return False, False
-    if key in (ord("t"), ord("T")):
-        return _handle_template_selection(state)
+    if key in (ord("p"), ord("P")):
+        return _handle_profile_pick(state)
+    if key in (ord("c"), ord("C")):
+        return _handle_profile_copy(state)
+    if key in (ord("n"), ord("N")):
+        return _handle_profile_rename(state)
 
     if key in (curses.KEY_BTAB, curses.KEY_STAB, 9):  # TAB
         cycle_focus(state)
@@ -526,21 +474,71 @@ def handle_key(state: CurveState, key: int) -> Tuple[bool, bool]:
     return handle_points_key(state, key)
 
 
-def _handle_template_selection(state: CurveState) -> Tuple[bool, bool]:
-    global ACTIVE_SCREEN
+def _profile_rows(state: CurveState, only: Tuple[str, ...] = tuple(ALL_IDS)) -> List[str]:
+    rows = []
+    for pid in only:
+        prof = state.profile if pid == state.profile_id else state.settings.profile(pid)
+        kind = "built-in" if prof.builtin else "custom"
+        rows.append(f"{prof.name:<{NAME_MAX}} {kind}")
+    return rows
+
+
+def _handle_profile_pick(state: CurveState) -> Tuple[bool, bool]:
     if ACTIVE_SCREEN is None:
         return False, False
-    temps, speeds, name = select_template(ACTIVE_SCREEN, state)
-    if name != state.preset_name:
-        state.modified_since_preset = False
-    state.preset_name = name
-    state.temps = list(temps)
-    state.speeds = list(speeds)
-    state.selected_index = min(state.selected_index, state.num_points - 1)
-    state.mark_modified()
-    if name != "Custom":
-        state.modified_since_preset = False
+    if not state.read_only:
+        valid, err = validate_state(state)
+        if not valid:
+            state.error_message = f"Fix this profile before switching: {err}"
+            return False, False
+    idx = pick_from_list(ACTIVE_SCREEN, "Profiles (the one you pick runs after Save)", _profile_rows(state),
+                         ALL_IDS.index(state.profile_id))
+    if idx is not None and ALL_IDS[idx] != state.profile_id:
+        state.commit()
+        state.view(ALL_IDS[idx])
+        state.status_message = (f"{state.profile.name}: built-in, read-only. Press C to copy it into a custom profile."
+                                if state.read_only else f"{state.profile.name}: custom profile.")
     return False, False
+
+
+def _handle_profile_copy(state: CurveState) -> Tuple[bool, bool]:
+    if ACTIVE_SCREEN is None:
+        return False, False
+    valid, err = validate_state(state)
+    if not valid:
+        state.error_message = err
+        return False, False
+    targets = tuple(c for c in CUSTOM_IDS if c != state.profile_id)
+    idx = pick_from_list(ACTIVE_SCREEN, f"Copy '{state.profile.name}' into (overwrites that slot)",
+                         _profile_rows(state, targets), 0)
+    if idx is None:
+        return False, False
+    source = state.profile.copy()
+    state.commit()
+    dest = state.settings.custom[targets[idx]]
+    dest.temps, dest.speeds = list(source.temps), list(source.speeds)
+    dest.smooth_enabled, dest.ramp_down, dest.smooth_extra = source.smooth_enabled, source.ramp_down, dict(source.smooth_extra)
+    state.view(targets[idx])
+    state.status_message = f"Copied into {dest.name}. Rename with N; nothing is saved until S."
+    return False, False
+
+
+def _handle_profile_rename(state: CurveState) -> Tuple[bool, bool]:
+    if ACTIVE_SCREEN is None:
+        return False, False
+    if state.read_only:
+        state.error_message = "Built-in profiles keep their names. Copy it to a custom profile first (C)."
+        return False, False
+    prof = state.settings.custom[state.profile_id]
+    new = prompt_text(ACTIVE_SCREEN, f"Name for {state.profile_id} (Enter=ok, Esc=cancel)", prof.name)
+    if new is not None:
+        prof.name = clean_name(new, f"Custom {state.profile_id[-1]}")
+        state.status_message = f"Renamed to {prof.name}."
+    return False, False
+
+
+EDIT_KEYS = (curses.KEY_LEFT, curses.KEY_RIGHT, ord("a"), ord("A"), ord("r"), ord("R"), ord(" "), 10, 13, curses.KEY_ENTER)
+READ_ONLY_MSG = "Built-in profile is read-only. Press C to copy it into a custom profile, or P to pick another."
 
 
 def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
@@ -552,6 +550,9 @@ def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
         state.field_index = (state.field_index + 1) % len(fields)
         return False, False
     attr = fields[state.field_index]
+    if state.read_only and attr in ("smooth_enabled", "ramp_down") and key in EDIT_KEYS + (ord("h"), ord("l")):
+        state.error_message = READ_ONLY_MSG
+        return False, False
     if attr == "ramp_down":
         step = None
         if key in (curses.KEY_LEFT, ord("h")):
@@ -562,14 +563,10 @@ def handle_fields_key(state: CurveState, key: int) -> Tuple[bool, bool]:
             idx = RAMP_LEVELS.index(state.ramp_down)
             state.ramp_down = RAMP_LEVELS[max(0, min(len(RAMP_LEVELS) - 1, idx + step))] \
                 if key not in (ord(" "), 10, 13, curses.KEY_ENTER) else RAMP_LEVELS[(idx + 1) % len(RAMP_LEVELS)]
-            state.mark_modified()
-            state.ensure_custom_preset()
         return False, False
     if attr == "smooth_enabled":
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("h"), ord("l"), ord(" "), 10, 13, curses.KEY_ENTER):
             state.smooth_enabled = not state.smooth_enabled
-            state.mark_modified()
-            state.ensure_custom_preset()
         return False, False
     if key in (curses.KEY_LEFT, ord("h")):
         adjust_runtime_value(state, attr, -1)
@@ -592,11 +589,12 @@ def adjust_runtime_value(state: CurveState, attr: str, delta: int) -> None:
     elif attr == "high_temp_threshold":
         value = clamp(value, TEMP_MIN, TEMP_MAX)
     setattr(state, attr, value)
-    state.mark_modified()
-    state.ensure_custom_preset()
 
 
 def handle_points_key(state: CurveState, key: int) -> Tuple[bool, bool]:
+    if state.read_only and key in EDIT_KEYS:
+        state.error_message = READ_ONLY_MSG
+        return False, False
     if key in (ord("a"), ord("A")):
         add_point(state)
         return False, False
@@ -656,8 +654,6 @@ def finalize_drag(state: CurveState) -> None:
         state.temps.insert(target, temp)
         state.speeds.insert(target, speed)
         state.selected_index = target
-        state.mark_modified()
-        state.ensure_custom_preset()
     state.dragging = False
 
 
@@ -763,7 +759,7 @@ def main() -> int:
         except OSError as exc:
             print(f"Failed to save configuration: {exc}")
             return 1
-        print(f"Configuration saved to {config_path}")
+        print(f"Configuration saved to {config_path} (active profile: {final_state.profile.name})")
         return 0
     print("No changes saved.")
     return 1

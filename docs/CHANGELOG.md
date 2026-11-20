@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.0
+**New**
+- **Profiles.** Five slots: **Quiet**, **Balanced**, **Performance** (built in,
+  read-only) and **custom1** / **custom2** (yours; give them any name). Each
+  profile is a curve plus its Smart Smooth settings; GPU and polling settings stay
+  shared. Quiet ramps down quickly, Balanced uses the balanced level, Performance
+  holds speed longest (`slow`). Switch with `nvfc profile <name>` (also accepts
+  `cool` and a custom profile's name) or `P` in the configurator, which also gets
+  `C` (copy a profile into a custom slot) and `N` (rename). `nvfc status` and the
+  status file show the active profile. The configurator's old `T` presets are
+  replaced by the built-in profiles + copy.
+- **Easy updates.** `nvfc update` downloads the newest release and installs it
+  (`--check`, `--yes`, `--force`, `--channel nightly`, `--from <folder|.tar.gz>`).
+  `./installer.sh` is now an incremental updater too: it replaces only what
+  changed and restarts the service only when the daemon, its unit or the config
+  format changed, so a configurator-only release never touches the running fan
+  control. Nothing to uninstall first; your config is kept.
+- **Config schema versions.** The config file records `[nvfc] config_version`.
+  Older files are upgraded in place when you update (the previous file is kept as
+  `<config>.v1.bak`), and future releases can chain further upgrades.
+
+**Compatibility**
+- Configs from every earlier release keep working untouched: the daemon reads
+  them as before, and updating or saving moves your old curve and Smart Smooth
+  settings into profile **custom1** ("Previous config"), kept active, so the fan
+  behaves exactly as it did.
+- Downgrading to 1.0.x after the config was upgraded: restore
+  `/etc/nvidia-fan-control.conf.v1.bak`.
+
+**Changed**
+- `./installer.sh` only needs gcc/make when the daemon has to be rebuilt.
+- `uninstall.sh --purge` also removes the `.vN.bak` backups.
+- Tests run through `bash` (no exec-bit needed).
+
 ## 1.0.2
 **Fixed**
 - The configurator (TUI) no longer flickers/refreshes while you look at it. It

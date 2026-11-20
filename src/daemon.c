@@ -84,6 +84,7 @@ static void nvfc_soft_reset_state(NvfcState *st) {
     st->stable = 0;
     st->sleep_now = 0;
     st->log_time = 0;
+    st->status_time = 0;  /* rewrite the status file so a profile switch shows up */
 }
 
 static void nvfc_handle_signal(int sig) {
@@ -270,6 +271,7 @@ static void nvfc_log_startup(const NvfcConfig *cfg) {
         "sleep_high=%d, sleep_max=%d, high_temp_threshold=%d)",
         NVFC_VERSION, cfg->gpu_index, cfg->num_points, temps_buf, speeds_buf,
         cfg->sleep_low, cfg->sleep_high, cfg->sleep_max, cfg->high_temp_threshold);
+    nvfc_log_info("Profile: %s (%s)", cfg->profile, cfg->profile_name);
     if (cfg->smooth_enabled) {
         nvfc_log_info("Smart Smooth: on (deadband=%d%%, emergency_temp=%d°C, ramp_down=%s%s: hold=%ds, "
                       "step=%d%% every %ds, filter=%ds)",
@@ -328,8 +330,8 @@ static void nvfc_status_update(const NvfcConfig *cfg, NvfcState *st, int temp, i
         st->status_disabled = true;  /* e.g. not running under systemd; stay quiet */
         return;
     }
-    fprintf(fp, "temp=%d\nfan=%d\ntarget=%d\nsmooth=%d\ninterval=%d\nts=%ld\n", temp, st->fan, target,
-            cfg->smooth_enabled, interval, (long)now);
+    fprintf(fp, "temp=%d\nfan=%d\ntarget=%d\nsmooth=%d\ninterval=%d\nprofile=%s\nts=%ld\n", temp, st->fan, target,
+            cfg->smooth_enabled, interval, cfg->profile, (long)now);
     fclose(fp);
     chmod(tmp, 0644);
     if (rename(tmp, path) != 0) {

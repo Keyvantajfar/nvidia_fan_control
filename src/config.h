@@ -5,7 +5,16 @@
 
 #define NVFC_MAX_POINTS 7
 
+/* Config file schema this build understands. Files without a [nvfc] section are
+ * schema 1 (pre-profiles) and are read as a single "custom1" profile. */
+#define NVFC_CONFIG_VERSION 2
+
+#define NVFC_PROFILE_ID_MAX 16
+#define NVFC_PROFILE_NAME_MAX 32
+
 typedef struct {
+    char profile[NVFC_PROFILE_ID_MAX];       /* active profile id: quiet, balanced, performance, custom1, custom2 */
+    char profile_name[NVFC_PROFILE_NAME_MAX];/* its display name */
     int temps[NVFC_MAX_POINTS];
     int speeds[NVFC_MAX_POINTS];
     int num_points;
